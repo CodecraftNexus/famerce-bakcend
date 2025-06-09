@@ -17,19 +17,11 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL || 'http://192.168.56.1:3000',
-    'http://192.168.56.1:3000',
-    'http://localhost:3001', 
-    'https://your-frontend-domain.com', // Add your actual production frontend domain
-    'https://farmersferts.com', // If this is your production domain
-  ],
+  origin: [process.env.FRONTEND_URL || 'http://localhost:3000', 'http://localhost:5173'],
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  optionsSuccessStatus: 200 // For legacy browser support
 }));
-
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI, {
@@ -57,6 +49,38 @@ const storage = new Storage({
 });
 
 const bucket = storage.bucket(process.env.GCP_BUCKET_NAME);
+
+// Helper function to extract GCS file path from full URL
+const extractGCSPath = (fullPath) => {
+  console.log('🔍 Processing path:', fullPath);
+
+  if (!fullPath) {
+    console.log('❌ No path provided');
+    return null;
+  }
+
+  // Handle multiple files separated by commas
+  const firstFile = fullPath.split(',')[0].trim();
+  console.log('📝 First file:', firstFile);
+
+  // If it's a full GCS URL - extract the path after bucket name
+  if (firstFile.startsWith('https://storage.googleapis.com/')) {
+    const urlParts = firstFile.split('/');
+    const bucketName = urlParts[3]; // Should be 'famerce'
+    const filePath = urlParts.slice(4).join('/'); // Everything after bucket name
+    console.log('🔗 GCS URL - Bucket:', bucketName, 'Path:', filePath);
+    return filePath;
+  }
+
+  // If it's already a relative path
+  if (firstFile.includes('/')) {
+    console.log('📁 Relative path:', firstFile);
+    return firstFile;
+  }
+
+  console.log('⚠️ Unknown path format:', firstFile);
+  return firstFile;
+};
 
 // Multer configuration for Google Cloud Storage
 const upload = multer({
@@ -228,6 +252,433 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// GCS FILE ACCESS ROUTES
+
+// Main route for getting signed URLs from full database paths
+app.post('/api/documents/get-signed-url', async (req, res) => {
+  try {
+    const { filePath, type = 'documents' } = req.body;
+
+    console.log('📨 Signed URL request for full path:', filePath);
+
+    if (!filePath) {
+      return res.status(400).json({
+        success: false,
+        message: 'File path is required'
+      });
+    }
+
+    // Extract the actual GCS path
+    const gcsPath = extractGCSPath(filePath);
+
+    if (!gcsPath) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid file path format'
+      });
+    }
+
+    console.log('🎯 Looking for file at GCS path:', gcsPath);
+
+    const file = bucket.file(gcsPath);
+
+    // Check if file exists
+    const [exists] = await file.exists();
+    if (!exists) {
+      console.log('❌ File not found:', gcsPath);
+
+      // Try alternative paths
+      const alternativePaths = [
+        `documents/${gcsPath}`,
+        `products/${gcsPath}`,
+        gcsPath.replace('documents/', ''),
+        gcsPath.replace('products/', '')
+      ];
+
+      console.log('🔄 Trying alternative paths:', alternativePaths);
+
+      for (const altPath of alternativePaths) {
+        const altFile = bucket.file(altPath);
+        const [altExists] = await altFile.exists();
+        if (altExists) {
+          console.log('✅ Found file at alternative path:', altPath);
+          const [signedUrl] = await altFile.getSignedUrl({
+            action: 'read',
+            expires: Date.now() + 15 * 60 * 1000,
+          });
+
+          return res.json({
+            success: true,
+            signedUrl,
+            actualPath: altPath
+          });
+        }
+      }
+
+      return res.status(404).json({
+        success: false,
+        message: 'File not found',
+        searchedPath: gcsPath,
+        alternativePaths
+      });
+    }
+
+    // Generate signed URL (valid for 15 minutes)
+    const [signedUrl] = await file.getSignedUrl({
+      action: 'read',
+      expires: Date.now() + 15 * 60 * 1000,
+    });
+
+    console.log('✅ Generated signed URL for:', gcsPath);
+    res.json({
+      success: true,
+      signedUrl,
+      actualPath: gcsPath
+    });
+
+  } catch (error) {
+    console.error('❌ Error generating signed URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate download URL',
+      error: error.message
+    });
+  }
+});
+
+// Legacy route for backward compatibility
+app.get('/api/documents/signed-url/:type/:filename(*)', async (req, res) => {
+  try {
+    const { type, filename } = req.params;
+
+    console.log('🎯 GET Signed URL request:');
+    console.log('   Type:', type);
+    console.log('   Filename:', filename);
+
+    // Validate file type
+    if (!['products', 'documents'].includes(type)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid file type. Must be "products" or "documents"'
+      });
+    }
+
+    // Decode URL-encoded filename
+    const decodedFilename = decodeURIComponent(filename);
+    console.log('📝 Decoded filename:', decodedFilename);
+
+    // Try different file path combinations
+    const possiblePaths = [
+      `${type}/${decodedFilename}`,
+      decodedFilename,
+      decodedFilename.startsWith(`${type}/`) ? decodedFilename : `${type}/${decodedFilename}`,
+      decodedFilename.includes('/') ? decodedFilename : `${type}/${decodedFilename}`
+    ];
+
+    console.log('🔍 Trying possible paths:', possiblePaths);
+
+    let file = null;
+    let actualPath = null;
+
+    for (const path of possiblePaths) {
+      try {
+        const testFile = bucket.file(path);
+        const [exists] = await testFile.exists();
+        console.log(`   ${path}: ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+
+        if (exists) {
+          file = testFile;
+          actualPath = path;
+          break;
+        }
+      } catch (checkError) {
+        console.log(`   ${path}: ⚠️ Error:`, checkError.message);
+      }
+    }
+
+    if (!file) {
+      console.log('❌ File not found in any path');
+      return res.status(404).json({
+        success: false,
+        message: 'File not found',
+        searchedPaths: possiblePaths,
+        type,
+        filename: decodedFilename
+      });
+    }
+
+    // Generate signed URL
+    const [signedUrl] = await file.getSignedUrl({
+      action: 'read',
+      expires: Date.now() + 15 * 60 * 1000,
+    });
+
+    console.log('✅ Generated signed URL for:', actualPath);
+    res.json({
+      success: true,
+      signedUrl,
+      actualPath
+    });
+
+  } catch (error) {
+    console.error('❌ Error generating signed URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate download URL',
+      error: error.message
+    });
+  }
+});
+
+// Direct download route
+app.get('/api/documents/download/:type/:filename(*)', async (req, res) => {
+  try {
+    const { type, filename } = req.params;
+
+    console.log('⬇️ Download request:');
+    console.log('   Type:', type);
+    console.log('   Filename:', filename);
+
+    // Validate file type
+    if (!['products', 'documents'].includes(type)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid file type'
+      });
+    }
+
+    const decodedFilename = decodeURIComponent(filename);
+    const possiblePaths = [
+      `${type}/${decodedFilename}`,
+      decodedFilename,
+      decodedFilename.startsWith(`${type}/`) ? decodedFilename : `${type}/${decodedFilename}`
+    ];
+
+    let file = null;
+    let actualPath = null;
+
+    for (const path of possiblePaths) {
+      try {
+        const testFile = bucket.file(path);
+        const [exists] = await testFile.exists();
+        console.log(`   ${path}: ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+
+        if (exists) {
+          file = testFile;
+          actualPath = path;
+          break;
+        }
+      } catch (checkError) {
+        console.log(`   ${path}: ⚠️ Error:`, checkError.message);
+      }
+    }
+
+    if (!file) {
+      console.log('❌ File not found for download');
+      return res.status(404).json({
+        success: false,
+        message: 'File not found',
+        searchedPaths: possiblePaths
+      });
+    }
+
+    // Get file metadata
+    const [metadata] = await file.getMetadata();
+    const downloadFilename = actualPath.split('/').pop();
+
+    // Set proper headers for download
+    res.set({
+      'Content-Type': metadata.contentType || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${downloadFilename}"`,
+      'Cache-Control': 'private, max-age=0',
+      'Access-Control-Allow-Origin': req.headers.origin || '*',
+      'Access-Control-Allow-Credentials': 'true'
+    });
+
+    // Stream the file
+    const stream = file.createReadStream();
+
+    stream.on('error', (error) => {
+      console.error('❌ Stream error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to download file'
+        });
+      }
+    });
+
+    stream.pipe(res);
+    console.log('✅ Streaming file:', actualPath);
+
+  } catch (error) {
+    console.error('❌ Download error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during download',
+      error: error.message
+    });
+  }
+});
+
+// Image proxy route
+app.get('/api/files/image/:filename(*)', async (req, res) => {
+  try {
+    const { filename } = req.params;
+
+    console.log('🖼️ Image request for:', filename);
+
+    const decodedFilename = decodeURIComponent(filename);
+    const possiblePaths = [
+      `products/${decodedFilename}`,
+      decodedFilename,
+      decodedFilename.startsWith('products/') ? decodedFilename : `products/${decodedFilename}`
+    ];
+
+    let file = null;
+    let actualPath = null;
+
+    for (const path of possiblePaths) {
+      try {
+        const testFile = bucket.file(path);
+        const [exists] = await testFile.exists();
+        console.log(`   ${path}: ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+
+        if (exists) {
+          file = testFile;
+          actualPath = path;
+          break;
+        }
+      } catch (checkError) {
+        console.log(`   ${path}: ⚠️ Error:`, checkError.message);
+      }
+    }
+
+    if (!file) {
+      console.log('❌ Image not found');
+      return res.status(404).json({
+        success: false,
+        message: 'Image not found',
+        searchedPaths: possiblePaths
+      });
+    }
+
+    // Get file metadata
+    const [metadata] = await file.getMetadata();
+
+    // Set proper headers for images
+    res.set({
+      'Content-Type': metadata.contentType || 'image/jpeg',
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': req.headers.origin || '*',
+    });
+
+    // Stream the image
+    const stream = file.createReadStream();
+
+    stream.on('error', (error) => {
+      console.error('❌ Image stream error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to load image'
+        });
+      }
+    });
+
+    stream.pipe(res);
+    console.log('✅ Streaming image:', actualPath);
+
+  } catch (error) {
+    console.error('❌ Image proxy error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error loading image',
+      error: error.message
+    });
+  }
+});
+
+// DEBUG ROUTES
+
+// List files in bucket
+app.get('/api/debug/list-files/:folder?', async (req, res) => {
+  try {
+    const folder = req.params.folder || '';
+    console.log('📋 Listing files in folder:', folder);
+
+    const [files] = await bucket.getFiles({
+      prefix: folder,
+      maxResults: 50
+    });
+
+    const fileList = files.map(file => ({
+      name: file.name,
+      size: file.metadata.size,
+      contentType: file.metadata.contentType,
+      created: file.metadata.timeCreated
+    }));
+
+    console.log(`✅ Found ${fileList.length} files`);
+    res.json({
+      success: true,
+      files: fileList,
+      folder: folder || 'root'
+    });
+
+  } catch (error) {
+    console.error('❌ Error listing files:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to list files',
+      error: error.message
+    });
+  }
+});
+
+// Check product files
+app.get('/api/debug/product-files/:productId', async (req, res) => {
+  try {
+    const { productId } = req.params;
+
+    const product = await Product.findOne({ productId });
+    if (!product) {
+      return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+
+    const fileInfo = {
+      productId,
+      imagePath: product.imagePath,
+      msds: product.msds,
+      npsApproval: product.npsApproval,
+      certifications: product.certifications?.qualityStandards
+    };
+
+    // Extract GCS paths for each file
+    const extractedPaths = {};
+    for (const [key, value] of Object.entries(fileInfo)) {
+      if (value && key !== 'productId') {
+        extractedPaths[key] = {
+          original: value,
+          extracted: extractGCSPath(value)
+        };
+      }
+    }
+
+    res.json({
+      success: true,
+      product: fileInfo,
+      extractedPaths
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Initialize admin user
 const initializeAdmin = async () => {
   try {
@@ -263,7 +714,8 @@ const updateExistingBatches = async () => {
   }
 };
 
-// Routes
+// EXISTING ROUTES
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -375,57 +827,46 @@ app.post('/api/products', authenticateToken, upload.fields([
       );
     }
     if (req.files['npsApprovalFiles[]']) {
-      req.files['npsApprovalFiles[]'].forEach((file) => {
-        uploadPromises.push(
-          new Promise((resolve, reject) => {
-            uploadToGCS(req, file, (err, url) => {
-              if (err) return reject(err);
-              productData.npsApproval = productData.npsApproval ? `${productData.npsApproval}, ${url}` : url;
-              resolve();
-            });
-          })
-        );
-      });
-    }
-    if (req.files['msdsFiles[]']) {
-      req.files['msdsFiles[]'].forEach((file) => {
-        uploadPromises.push(
-          new Promise((resolve, reject) => {
-            uploadToGCS(req, file, (err, url) => {
-              if (err) return reject(err);
-              productData.msds = productData.msds ? `${productData.msds}, ${url}` : url;
-              resolve();
-            });
-          })
-        );
-      });
-    }
-    if (req.files['certificationsFiles[]']) {
-      req.files['certificationsFiles[]'].forEach((file) => {
-        uploadPromises.push(
-          new Promise((resolve, reject) => {
-            uploadToGCS(req, file, (err, url) => {
-              if (err) return reject(err);
-              productData.certifications = productData.certifications || { qualityStandards: '' };
-              productData.certifications.qualityStandards = productData.certifications.qualityStandards
-                ? `${productData.certifications.qualityStandards}, ${url}`
-                : url;
-              resolve();
-            });
-          })
-        );
-      });
-    }
+      if (req.files['msdsFiles[]']) {
+        req.files['msdsFiles[]'].forEach((file) => {
+          uploadPromises.push(
+            new Promise((resolve, reject) => {
+              uploadToGCS(req, file, (err, url) => {
+                if (err) return reject(err);
+                productData.msds = productData.msds ? `${productData.msds}, ${url}` : url;
+                resolve();
+              });
+            })
+          );
+        });
+      }
+      if (req.files['certificationsFiles[]']) {
+        req.files['certificationsFiles[]'].forEach((file) => {
+          uploadPromises.push(
+            new Promise((resolve, reject) => {
+              uploadToGCS(req, file, (err, url) => {
+                if (err) return reject(err);
+                productData.certifications = productData.certifications || { qualityStandards: '' };
+                productData.certifications.qualityStandards = productData.certifications.qualityStandards
+                  ? `${productData.certifications.qualityStandards}, ${url}`
+                  : url;
+                resolve();
+              });
+            })
+          );
+        });
+      }
 
-    await Promise.all(uploadPromises);
-    const product = new Product(productData);
-    await product.save();
-    res.json({ success: true, message: 'Product created successfully', product });
-  } catch (error) {
-    console.error('Create product error:', error.message, error.stack);
-    res.status(500).json({ success: false, message: 'Failed to create product', error: error.message });
-  }
-});
+        await Promise.all(uploadPromises);
+        const product = new Product(productData);
+        await product.save();
+        res.json({ success: true, message: 'Product created successfully', product });
+      } 
+    } catch (error) {
+      console.error('Create product error:', error.message, error.stack);
+      res.status(500).json({ success: false, message: 'Failed to create product', error: error.message });
+    }
+  });
 
 app.put('/api/products/:productId', authenticateToken, upload.fields([
   { name: 'image', maxCount: 1 },
@@ -636,6 +1077,13 @@ app.use((req, res) => {
 // Start server
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('🔗 GCS file access routes available:');
+  console.log(`   POST /api/documents/get-signed-url`);
+  console.log(`   GET  /api/documents/signed-url/:type/:filename`);
+  console.log(`   GET  /api/documents/download/:type/:filename`);
+  console.log(`   GET  /api/files/image/:filename`);
+  console.log(`   GET  /api/debug/list-files/:folder`);
+  console.log(`   GET  /api/debug/product-files/:productId`);
   await initializeAdmin();
   await updateExistingBatches();
 });
