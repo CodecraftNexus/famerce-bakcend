@@ -18,8 +18,8 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(cors({
   origin: [
-    process.env.FRONTEND_URL || 'http://localhost:3000',
-    'http://localhost:3000',
+    process.env.FRONTEND_URL || 'http://192.168.56.1:3000',
+    'http://192.168.56.1:3000',
     'http://localhost:3001', 
     'https://your-frontend-domain.com', // Add your actual production frontend domain
     'https://farmersferts.com', // If this is your production domain
