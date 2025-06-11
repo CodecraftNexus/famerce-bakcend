@@ -159,41 +159,7 @@ if (USE_CLOUDINARY) {
   });
 }
 
-// Enhanced File Upload Handler for Cloudinary
-const handleFileUpload = async (file, type = 'document') => {
-  if (!USE_CLOUDINARY) {
-    throw new Error('Cloudinary upload called but not configured');
-  }
 
-  return new Promise((resolve, reject) => {
-    const uploadOptions = {
-      folder: type === 'image' ? 'famerce/products' : 'famerce/documents',
-      resource_type: type === 'image' ? 'image' : 'raw',
-      use_filename: true,
-      unique_filename: true,
-    };
-
-    if (type === 'image') {
-      uploadOptions.transformation = [
-        { width: 1200, height: 900, crop: 'limit', quality: 'auto:good' }
-      ];
-    }
-
-    const uploadStream = cloudinary.uploader.upload_stream(
-      uploadOptions,
-      (error, result) => {
-        if (error) {
-          console.error('Cloudinary upload error:', error);
-          reject(error);
-        } else {
-          resolve(result.secure_url);
-        }
-      }
-    );
-
-    uploadStream.end(file.buffer);
-  });
-};
 
 // Enhanced Schemas
 const userSchema = new mongoose.Schema({
@@ -876,14 +842,29 @@ app.get('/api/products', authenticateToken, async (req, res) => {
   }
 });
 
+// Fixed Product Routes with proper file upload handling
+
+// Enhanced Product Creation Route
 app.post('/api/products', authenticateToken, upload.fields([
   { name: 'image', maxCount: 1 },
-  { name: 'npsApprovalFiles[]', maxCount: 10 },
-  { name: 'msdsFiles[]', maxCount: 10 },
-  { name: 'certificationsFiles[]', maxCount: 10 }
+  { name: 'npsApprovalFiles', maxCount: 10 },  // Fixed: removed []
+  { name: 'msdsFiles', maxCount: 10 },         // Fixed: removed []
+  { name: 'certificationsFiles', maxCount: 10 } // Fixed: removed []
 ]), async (req, res) => {
   try {
-    const productData = JSON.parse(req.body.productData);
+    console.log('Received files:', req.files); // Debug log
+    console.log('Received body:', req.body);   // Debug log
+    
+    let productData;
+    try {
+      productData = JSON.parse(req.body.productData);
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError);
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid product data format' 
+      });
+    }
     
     // Validate required fields
     if (!productData.productId || !productData.name) {
@@ -904,98 +885,124 @@ app.post('/api/products', authenticateToken, upload.fields([
 
     // Handle file uploads
     if (USE_CLOUDINARY) {
-      const uploadPromises = [];
-
+      console.log('Using Cloudinary for file uploads');
+      
       // Upload image
-      if (req.files.image && req.files.image[0]) {
-        uploadPromises.push(
-          handleFileUpload(req.files.image[0], 'image').then(url => {
-            productData.imagePath = url;
-          }).catch(err => {
-            console.error('Image upload error:', err);
-            throw new Error('Failed to upload image');
-          })
-        );
+      if (req.files && req.files.image && req.files.image[0]) {
+        try {
+          console.log('Uploading image to Cloudinary...');
+          const imageUrl = await handleFileUpload(req.files.image[0], 'image');
+          productData.imagePath = imageUrl;
+          console.log('Image uploaded successfully:', imageUrl);
+        } catch (error) {
+          console.error('Image upload error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to upload image: ' + error.message
+          });
+        }
       }
 
       // Upload NPS approval files
-      if (req.files['npsApprovalFiles[]']) {
-        const npsUrls = [];
-        for (const file of req.files['npsApprovalFiles[]']) {
-          uploadPromises.push(
-            handleFileUpload(file, 'documents').then(url => {
-              npsUrls.push(url);
-            }).catch(err => {
-              console.error('NPS file upload error:', err);
-              throw new Error('Failed to upload NPS approval files');
-            })
-          );
+      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
+        try {
+          console.log('Uploading NPS approval files...');
+          const npsUrls = [];
+          for (const file of req.files.npsApprovalFiles) {
+            const url = await handleFileUpload(file, 'documents');
+            npsUrls.push(url);
+          }
+          productData.npsApproval = npsUrls.join(', ');
+          console.log('NPS files uploaded successfully:', npsUrls);
+        } catch (error) {
+          console.error('NPS files upload error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to upload NPS approval files: ' + error.message
+          });
         }
-        await Promise.all(uploadPromises.slice(-req.files['npsApprovalFiles[]'].length));
-        productData.npsApproval = npsUrls.join(', ');
       }
 
-      // Upload MSDS files  
-      if (req.files['msdsFiles[]']) {
-        const msdsUrls = [];
-        for (const file of req.files['msdsFiles[]']) {
-          uploadPromises.push(
-            handleFileUpload(file, 'documents').then(url => {
-              msdsUrls.push(url);
-            }).catch(err => {
-              console.error('MSDS file upload error:', err);
-              throw new Error('Failed to upload MSDS files');
-            })
-          );
+      // Upload MSDS files
+      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
+        try {
+          console.log('Uploading MSDS files...');
+          const msdsUrls = [];
+          for (const file of req.files.msdsFiles) {
+            const url = await handleFileUpload(file, 'documents');
+            msdsUrls.push(url);
+          }
+          productData.msds = msdsUrls.join(', ');
+          console.log('MSDS files uploaded successfully:', msdsUrls);
+        } catch (error) {
+          console.error('MSDS files upload error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to upload MSDS files: ' + error.message
+          });
         }
-        await Promise.all(uploadPromises.slice(-req.files['msdsFiles[]'].length));
-        productData.msds = msdsUrls.join(', ');
       }
 
       // Upload certification files
-      if (req.files['certificationsFiles[]']) {
-        const certUrls = [];
-        for (const file of req.files['certificationsFiles[]']) {
-          uploadPromises.push(
-            handleFileUpload(file, 'documents').then(url => {
-              certUrls.push(url);
-            }).catch(err => {
-              console.error('Certification file upload error:', err);
-              throw new Error('Failed to upload certification files');
-            })
-          );
-        }
-        await Promise.all(uploadPromises.slice(-req.files['certificationsFiles[]'].length));
-        if (certUrls.length > 0) {
-          productData.certifications = productData.certifications || {};
-          productData.certifications.qualityStandards = certUrls.join(', ');
+      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
+        try {
+          console.log('Uploading certification files...');
+          const certUrls = [];
+          for (const file of req.files.certificationsFiles) {
+            const url = await handleFileUpload(file, 'documents');
+            certUrls.push(url);
+          }
+          if (certUrls.length > 0) {
+            productData.certifications = productData.certifications || {};
+            productData.certifications.qualityStandards = certUrls.join(', ');
+          }
+          console.log('Certification files uploaded successfully:', certUrls);
+        } catch (error) {
+          console.error('Certification files upload error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to upload certification files: ' + error.message
+          });
         }
       }
-
-      await Promise.all(uploadPromises);
     } else {
       // Local file handling
-      if (req.files.image && req.files.image[0]) {
+      console.log('Using local storage for file uploads');
+      
+      if (req.files && req.files.image && req.files.image[0]) {
         productData.imagePath = `/uploads/products/${req.files.image[0].filename}`;
+        console.log('Image saved locally:', productData.imagePath);
       }
 
-      if (req.files['npsApprovalFiles[]']) {
-        productData.npsApproval = req.files['npsApprovalFiles[]'].map(file => `/uploads/documents/${file.filename}`).join(', ');
+      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
+        productData.npsApproval = req.files.npsApprovalFiles
+          .map(file => `/uploads/documents/${file.filename}`)
+          .join(', ');
+        console.log('NPS files saved locally:', productData.npsApproval);
       }
 
-      if (req.files['msdsFiles[]']) {
-        productData.msds = req.files['msdsFiles[]'].map(file => `/uploads/documents/${file.filename}`).join(', ');
+      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
+        productData.msds = req.files.msdsFiles
+          .map(file => `/uploads/documents/${file.filename}`)
+          .join(', ');
+        console.log('MSDS files saved locally:', productData.msds);
       }
 
-      if (req.files['certificationsFiles[]']) {
+      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
         productData.certifications = productData.certifications || {};
-        productData.certifications.qualityStandards = req.files['certificationsFiles[]'].map(file => `/uploads/documents/${file.filename}`).join(', ');
+        productData.certifications.qualityStandards = req.files.certificationsFiles
+          .map(file => `/uploads/documents/${file.filename}`)
+          .join(', ');
+        console.log('Certification files saved locally:', productData.certifications.qualityStandards);
       }
     }
 
+    // Create the product
+    console.log('Creating product with data:', productData);
     const product = new Product(productData);
     await product.save();
 
+    console.log('Product created successfully:', product._id);
     res.json({
       success: true,
       message: 'Product created successfully',
@@ -1011,15 +1018,78 @@ app.post('/api/products', authenticateToken, upload.fields([
   }
 });
 
+// Enhanced File Upload Handler for Cloudinary with better error handling
+const handleFileUpload = async (file, type = 'document') => {
+  if (!USE_CLOUDINARY) {
+    throw new Error('Cloudinary upload called but not configured');
+  }
+
+  console.log(`Starting ${type} upload for file:`, file.originalname);
+
+  return new Promise((resolve, reject) => {
+    const uploadOptions = {
+      folder: type === 'image' ? 'famerce/products' : 'famerce/documents',
+      resource_type: type === 'image' ? 'image' : 'raw',
+      use_filename: true,
+      unique_filename: true,
+      timeout: 60000, // 60 second timeout
+    };
+
+    if (type === 'image') {
+      uploadOptions.transformation = [
+        { width: 1200, height: 900, crop: 'limit', quality: 'auto:good' }
+      ];
+    }
+
+    console.log('Upload options:', uploadOptions);
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          console.error('Cloudinary upload error:', error);
+          reject(new Error(`Cloudinary upload failed: ${error.message}`));
+        } else {
+          console.log('Cloudinary upload success:', result.secure_url);
+          resolve(result.secure_url);
+        }
+      }
+    );
+
+    // Handle stream errors
+    uploadStream.on('error', (error) => {
+      console.error('Upload stream error:', error);
+      reject(new Error(`Upload stream failed: ${error.message}`));
+    });
+
+    uploadStream.end(file.buffer);
+  });
+};
+
+// Fixed Update Product Route
 app.put('/api/products/:productId', authenticateToken, upload.fields([
   { name: 'image', maxCount: 1 },
-  { name: 'npsApprovalFiles', maxCount: 10 },
-  { name: 'msdsFiles', maxCount: 10 },
-  { name: 'certificationsFiles', maxCount: 10 }
+  { name: 'npsApprovalFiles', maxCount: 10 },    // Fixed: removed []
+  { name: 'msdsFiles', maxCount: 10 },           // Fixed: removed []
+  { name: 'certificationsFiles', maxCount: 10 }  // Fixed: removed []
 ]), async (req, res) => {
   try {
     const { productId } = req.params;
-    const productData = JSON.parse(req.body.productData);
+    
+    console.log('Update request for product:', productId);
+    console.log('Received files:', req.files);
+    console.log('Received body:', req.body);
+
+    let productData;
+    try {
+      productData = JSON.parse(req.body.productData);
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError);
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid product data format' 
+      });
+    }
 
     const existingProduct = await Product.findOne({ productId });
     if (!existingProduct) {
@@ -1029,90 +1099,100 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
       });
     }
 
-    // Handle file uploads
+    // Handle file uploads (same logic as create but for update)
     if (USE_CLOUDINARY) {
-      const uploadPromises = [];
-
-      if (req.files.image && req.files.image[0]) {
-        uploadPromises.push(
-          handleFileUpload(req.files.image[0], 'image').then(url => {
-            productData.imagePath = url;
-          }).catch(err => {
-            console.error('Image upload error:', err);
-            throw new Error('Failed to upload image');
-          })
-        );
-      }
-
-      if (req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        const npsUrls = [];
-        for (const file of req.files.npsApprovalFiles) {
-          uploadPromises.push(
-            handleFileUpload(file, 'documents').then(url => {
-              npsUrls.push(url);
-            }).catch(err => {
-              console.error('NPS file upload error:', err);
-              throw new Error('Failed to upload NPS approval files');
-            })
-          );
-        }
-        await Promise.all(uploadPromises.slice(-req.files.npsApprovalFiles.length));
-        productData.npsApproval = npsUrls.join(', ');
-      }
-
-      if (req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        const msdsUrls = [];
-        for (const file of req.files.msdsFiles) {
-          uploadPromises.push(
-            handleFileUpload(file, 'documents').then(url => {
-              msdsUrls.push(url);
-            }).catch(err => {
-              console.error('MSDS file upload error:', err);
-              throw new Error('Failed to upload MSDS files');
-            })
-          );
-        }
-        await Promise.all(uploadPromises.slice(-req.files.msdsFiles.length));
-        productData.msds = msdsUrls.join(', ');
-      }
-
-      if (req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        const certUrls = [];
-        for (const file of req.files.certificationsFiles) {
-          uploadPromises.push(
-            handleFileUpload(file, 'documents').then(url => {
-              certUrls.push(url);
-            }).catch(err => {
-              console.error('Certification file upload error:', err);
-              throw new Error('Failed to upload certification files');
-            })
-          );
-        }
-        await Promise.all(uploadPromises.slice(-req.files.certificationsFiles.length));
-        if (certUrls.length > 0) {
-          productData.certifications = productData.certifications || {};
-          productData.certifications.qualityStandards = certUrls.join(', ');
+      console.log('Using Cloudinary for file updates');
+      
+      // Update image if provided
+      if (req.files && req.files.image && req.files.image[0]) {
+        try {
+          console.log('Updating image...');
+          const imageUrl = await handleFileUpload(req.files.image[0], 'image');
+          productData.imagePath = imageUrl;
+          console.log('Image updated successfully:', imageUrl);
+        } catch (error) {
+          console.error('Image update error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to update image: ' + error.message
+          });
         }
       }
 
-      await Promise.all(uploadPromises);
+      // Handle other file updates similarly...
+      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
+        try {
+          const npsUrls = [];
+          for (const file of req.files.npsApprovalFiles) {
+            const url = await handleFileUpload(file, 'documents');
+            npsUrls.push(url);
+          }
+          productData.npsApproval = npsUrls.join(', ');
+        } catch (error) {
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to update NPS approval files: ' + error.message
+          });
+        }
+      }
+
+      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
+        try {
+          const msdsUrls = [];
+          for (const file of req.files.msdsFiles) {
+            const url = await handleFileUpload(file, 'documents');
+            msdsUrls.push(url);
+          }
+          productData.msds = msdsUrls.join(', ');
+        } catch (error) {
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to update MSDS files: ' + error.message
+          });
+        }
+      }
+
+      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
+        try {
+          const certUrls = [];
+          for (const file of req.files.certificationsFiles) {
+            const url = await handleFileUpload(file, 'documents');
+            certUrls.push(url);
+          }
+          if (certUrls.length > 0) {
+            productData.certifications = productData.certifications || {};
+            productData.certifications.qualityStandards = certUrls.join(', ');
+          }
+        } catch (error) {
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to update certification files: ' + error.message
+          });
+        }
+      }
     } else {
-      // Local file handling
-      if (req.files.image && req.files.image[0]) {
+      // Local file handling for updates
+      if (req.files && req.files.image && req.files.image[0]) {
         productData.imagePath = `/uploads/products/${req.files.image[0].filename}`;
       }
 
-      if (req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        productData.npsApproval = req.files.npsApprovalFiles.map(file => `/uploads/documents/${file.filename}`).join(', ');
+      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
+        productData.npsApproval = req.files.npsApprovalFiles
+          .map(file => `/uploads/documents/${file.filename}`)
+          .join(', ');
       }
 
-      if (req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        productData.msds = req.files.msdsFiles.map(file => `/uploads/documents/${file.filename}`).join(', ');
+      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
+        productData.msds = req.files.msdsFiles
+          .map(file => `/uploads/documents/${file.filename}`)
+          .join(', ');
       }
 
-      if (req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
+      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
         productData.certifications = productData.certifications || {};
-        productData.certifications.qualityStandards = req.files.certificationsFiles.map(file => `/uploads/documents/${file.filename}`).join(', ');
+        productData.certifications.qualityStandards = req.files.certificationsFiles
+          .map(file => `/uploads/documents/${file.filename}`)
+          .join(', ');
       }
     }
 
@@ -1122,6 +1202,7 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
       { new: true, runValidators: true }
     );
 
+    console.log('Product updated successfully:', updatedProduct._id);
     res.json({
       success: true,
       message: 'Product updated successfully',
@@ -1136,6 +1217,37 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
     });
   }
 });
+
+// Enhanced file filter with better validation
+const enhancedFileFilter = (req, file, cb) => {
+  console.log('File filter check:', {
+    fieldname: file.fieldname,
+    mimetype: file.mimetype,
+    originalname: file.originalname
+  });
+
+  if (file.fieldname === 'image') {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Invalid image file type: ${file.mimetype}. Only image files are allowed.`));
+    }
+  } else if (['npsApprovalFiles', 'msdsFiles', 'certificationsFiles'].includes(file.fieldname)) {
+    const allowedTypes = [
+      'application/pdf', 
+      'application/msword', 
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain'
+    ];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Invalid document file type: ${file.mimetype}. Only PDF, DOC, DOCX, and TXT files are allowed.`));
+    }
+  } else {
+    cb(new Error(`Unknown field: ${file.fieldname}`));
+  }
+};
 
 app.delete('/api/products/:productId', authenticateToken, async (req, res) => {
   try {
