@@ -541,7 +541,7 @@ if (USE_CLOUDINARY) {
     try {
       const { filename } = req.params;
       
-      const cloudinaryUrl = cloudinary.url(`famerce/products/${filename}`, {
+      const cloudinaryUrl = cloudinary.url(`dbh79giqj/products/${filename}`, {
         resource_type: 'image',
         secure: true,
         fetch_format: 'auto',
@@ -582,7 +582,7 @@ if (USE_CLOUDINARY) {
         filename = filename.split(',')[0].trim();
       }
 
-      const downloadUrl = cloudinary.url(`famerce/${type}/${filename}`, {
+      const downloadUrl = cloudinary.url(`dbh79giqj/${type}/${filename}`, {
         resource_type: 'raw',
         secure: true,
         flags: 'attachment'
@@ -591,7 +591,7 @@ if (USE_CLOUDINARY) {
       res.json({
         success: true,
         signedUrl: downloadUrl,
-        actualPath: `famerce/${type}/${filename}`
+        actualPath: `dbh79giqj/${type}/${filename}`
       });
       
     } catch (error) {
@@ -608,7 +608,7 @@ if (USE_CLOUDINARY) {
     try {
       const { type, filename } = req.params;
       
-      const downloadUrl = cloudinary.url(`famerce/${type}/${filename}`, {
+      const downloadUrl = cloudinary.url(`dbh79giqj/${type}/${filename}`, {
         resource_type: 'raw',
         secure: true,
         flags: 'attachment'
@@ -633,7 +633,7 @@ if (USE_CLOUDINARY) {
     try {
       const { type, filename } = req.params;
       
-      const downloadUrl = cloudinary.url(`famerce/${type}/${filename}`, {
+      const downloadUrl = cloudinary.url(`dbh79giqj/${type}/${filename}`, {
         resource_type: 'raw',
         secure: true,
         flags: 'attachment'
@@ -1028,7 +1028,7 @@ const handleFileUpload = async (file, type = 'document') => {
 
   return new Promise((resolve, reject) => {
     const uploadOptions = {
-      folder: type === 'image' ? 'famerce/products' : 'famerce/documents',
+      folder: type === 'image' ? 'dbh79giqj/products' : 'dbh79giqj/documents',
       resource_type: type === 'image' ? 'image' : 'raw',
       use_filename: true,
       unique_filename: true,
