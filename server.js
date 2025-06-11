@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3001;
 const USE_CLOUDINARY = process.env.USE_CLOUDINARY === 'true';
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/fertilizer_management', {
+mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 });
