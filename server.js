@@ -71,15 +71,36 @@ if (!USE_CLOUDINARY) {
   app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 }
 
-// Cloudinary Configuration
+// FIXED Cloudinary Configuration
 if (USE_CLOUDINARY) {
+  // Validate required environment variables
+  if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+    console.error('❌ Missing required Cloudinary environment variables');
+    console.error('Required: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET');
+    console.error('Current values:');
+    console.error('- CLOUDINARY_CLOUD_NAME:', process.env.CLOUDINARY_CLOUD_NAME ? 'Set' : 'Missing');
+    console.error('- CLOUDINARY_API_KEY:', process.env.CLOUDINARY_API_KEY ? 'Set' : 'Missing');
+    console.error('- CLOUDINARY_API_SECRET:', process.env.CLOUDINARY_API_SECRET ? 'Set' : 'Missing');
+    process.exit(1);
+  }
+
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true // Always use HTTPS
   });
 
-  console.log('🔗 Cloudinary storage configured');
+  // Test the configuration
+  cloudinary.api.ping()
+    .then(() => {
+      console.log('🔗 Cloudinary storage configured and tested successfully');
+      console.log(`📁 Cloud name: ${process.env.CLOUDINARY_CLOUD_NAME}`);
+    })
+    .catch((error) => {
+      console.error('❌ Cloudinary configuration test failed:', error.message);
+      console.error('Please check your Cloudinary credentials in .env file');
+    });
 } else {
   console.log('💾 Local file storage configured');
 }
@@ -92,23 +113,32 @@ if (USE_CLOUDINARY) {
     storage: multer.memoryStorage(),
     limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
     fileFilter: function (req, file, cb) {
+      console.log('File filter check:', {
+        fieldname: file.fieldname,
+        mimetype: file.mimetype,
+        originalname: file.originalname
+      });
+
       if (file.fieldname === 'image') {
         if (file.mimetype.startsWith('image/')) {
           cb(null, true);
         } else {
-          cb(new Error('Only image files are allowed for product images'));
+          cb(new Error(`Invalid image file type: ${file.mimetype}. Only image files are allowed.`));
         }
-      } else {
+      } else if (['npsApprovalFiles', 'msdsFiles', 'certificationsFiles'].includes(file.fieldname)) {
         const allowedTypes = [
           'application/pdf', 
           'application/msword', 
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'text/plain'
         ];
         if (allowedTypes.includes(file.mimetype)) {
           cb(null, true);
         } else {
-          cb(new Error('Only PDF, DOC, and DOCX files are allowed for documents'));
+          cb(new Error(`Invalid document file type: ${file.mimetype}. Only PDF, DOC, DOCX, and TXT files are allowed.`));
         }
+      } else {
+        cb(new Error(`Unknown field: ${file.fieldname}`));
       }
     }
   });
@@ -158,8 +188,6 @@ if (USE_CLOUDINARY) {
     }
   });
 }
-
-
 
 // Enhanced Schemas
 const userSchema = new mongoose.Schema({
@@ -448,6 +476,55 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// FIXED File Upload Handler for Cloudinary
+const handleFileUpload = async (file, type = 'document') => {
+  if (!USE_CLOUDINARY) {
+    throw new Error('Cloudinary upload called but not configured');
+  }
+
+  console.log(`Starting ${type} upload for file:`, file.originalname);
+
+  return new Promise((resolve, reject) => {
+    // FIXED: Use proper folder structure without hardcoded cloud name
+    const uploadOptions = {
+      folder: type === 'image' ? 'products' : 'documents', // Removed hardcoded cloud name
+      resource_type: type === 'image' ? 'image' : 'raw',
+      use_filename: true,
+      unique_filename: true,
+      timeout: 60000, // 60 second timeout
+    };
+
+    if (type === 'image') {
+      uploadOptions.transformation = [
+        { width: 1200, height: 900, crop: 'limit', quality: 'auto:good' }
+      ];
+    }
+
+    console.log('Upload options:', uploadOptions);
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          console.error('Cloudinary upload error:', error);
+          reject(new Error(`Cloudinary upload failed: ${error.message}`));
+        } else {
+          console.log('Cloudinary upload success:', result.secure_url);
+          resolve(result.secure_url);
+        }
+      }
+    );
+
+    // Handle stream errors
+    uploadStream.on('error', (error) => {
+      console.error('Upload stream error:', error);
+      reject(new Error(`Upload stream failed: ${error.message}`));
+    });
+
+    uploadStream.end(file.buffer);
+  });
+};
+
 // Enhanced admin initialization
 const initializeAdmin = async () => {
   try {
@@ -534,14 +611,15 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Enhanced File Access Routes for Cloudinary
+// FIXED File Access Routes for Cloudinary
 if (USE_CLOUDINARY) {
-  // Image proxy route
+  // Image proxy route - FIXED
   app.get('/api/files/image/:filename(*)', (req, res) => {
     try {
       const { filename } = req.params;
       
-      const cloudinaryUrl = cloudinary.url(`dbh79giqj/products/${filename}`, {
+      // FIXED: Use environment variable for cloud name
+      const cloudinaryUrl = cloudinary.url(`products/${filename}`, {
         resource_type: 'image',
         secure: true,
         fetch_format: 'auto',
@@ -560,7 +638,7 @@ if (USE_CLOUDINARY) {
     }
   });
 
-  // Document download routes
+  // Document download routes - FIXED
   app.post('/api/documents/get-signed-url', async (req, res) => {
     try {
       const { filePath, type = 'documents' } = req.body;
@@ -582,7 +660,8 @@ if (USE_CLOUDINARY) {
         filename = filename.split(',')[0].trim();
       }
 
-      const downloadUrl = cloudinary.url(`dbh79giqj/${type}/${filename}`, {
+      // FIXED: Use correct folder structure
+      const downloadUrl = cloudinary.url(`${type}/${filename}`, {
         resource_type: 'raw',
         secure: true,
         flags: 'attachment'
@@ -591,7 +670,7 @@ if (USE_CLOUDINARY) {
       res.json({
         success: true,
         signedUrl: downloadUrl,
-        actualPath: `dbh79giqj/${type}/${filename}`
+        actualPath: `${type}/${filename}`
       });
       
     } catch (error) {
@@ -608,7 +687,8 @@ if (USE_CLOUDINARY) {
     try {
       const { type, filename } = req.params;
       
-      const downloadUrl = cloudinary.url(`dbh79giqj/${type}/${filename}`, {
+      // FIXED: Simplified URL generation
+      const downloadUrl = cloudinary.url(`${type}/${filename}`, {
         resource_type: 'raw',
         secure: true,
         flags: 'attachment'
@@ -633,7 +713,8 @@ if (USE_CLOUDINARY) {
     try {
       const { type, filename } = req.params;
       
-      const downloadUrl = cloudinary.url(`dbh79giqj/${type}/${filename}`, {
+      // FIXED: Simplified download URL
+      const downloadUrl = cloudinary.url(`${type}/${filename}`, {
         resource_type: 'raw',
         secure: true,
         flags: 'attachment'
@@ -842,18 +923,16 @@ app.get('/api/products', authenticateToken, async (req, res) => {
   }
 });
 
-// Fixed Product Routes with proper file upload handling
-
-// Enhanced Product Creation Route
+// FIXED Product Creation Route
 app.post('/api/products', authenticateToken, upload.fields([
   { name: 'image', maxCount: 1 },
-  { name: 'npsApprovalFiles', maxCount: 10 },  // Fixed: removed []
-  { name: 'msdsFiles', maxCount: 10 },         // Fixed: removed []
-  { name: 'certificationsFiles', maxCount: 10 } // Fixed: removed []
+  { name: 'npsApprovalFiles', maxCount: 10 },
+  { name: 'msdsFiles', maxCount: 10 },
+  { name: 'certificationsFiles', maxCount: 10 }
 ]), async (req, res) => {
   try {
-    console.log('Received files:', req.files); // Debug log
-    console.log('Received body:', req.body);   // Debug log
+    console.log('Received files:', req.files);
+    console.log('Received body:', req.body);
     
     let productData;
     try {
@@ -1018,60 +1097,12 @@ app.post('/api/products', authenticateToken, upload.fields([
   }
 });
 
-// Enhanced File Upload Handler for Cloudinary with better error handling
-const handleFileUpload = async (file, type = 'document') => {
-  if (!USE_CLOUDINARY) {
-    throw new Error('Cloudinary upload called but not configured');
-  }
-
-  console.log(`Starting ${type} upload for file:`, file.originalname);
-
-  return new Promise((resolve, reject) => {
-    const uploadOptions = {
-      folder: type === 'image' ? 'dbh79giqj/products' : 'dbh79giqj/documents',
-      resource_type: type === 'image' ? 'image' : 'raw',
-      use_filename: true,
-      unique_filename: true,
-      timeout: 60000, // 60 second timeout
-    };
-
-    if (type === 'image') {
-      uploadOptions.transformation = [
-        { width: 1200, height: 900, crop: 'limit', quality: 'auto:good' }
-      ];
-    }
-
-    console.log('Upload options:', uploadOptions);
-
-    const uploadStream = cloudinary.uploader.upload_stream(
-      uploadOptions,
-      (error, result) => {
-        if (error) {
-          console.error('Cloudinary upload error:', error);
-          reject(new Error(`Cloudinary upload failed: ${error.message}`));
-        } else {
-          console.log('Cloudinary upload success:', result.secure_url);
-          resolve(result.secure_url);
-        }
-      }
-    );
-
-    // Handle stream errors
-    uploadStream.on('error', (error) => {
-      console.error('Upload stream error:', error);
-      reject(new Error(`Upload stream failed: ${error.message}`));
-    });
-
-    uploadStream.end(file.buffer);
-  });
-};
-
-// Fixed Update Product Route
+// FIXED Update Product Route
 app.put('/api/products/:productId', authenticateToken, upload.fields([
   { name: 'image', maxCount: 1 },
-  { name: 'npsApprovalFiles', maxCount: 10 },    // Fixed: removed []
-  { name: 'msdsFiles', maxCount: 10 },           // Fixed: removed []
-  { name: 'certificationsFiles', maxCount: 10 }  // Fixed: removed []
+  { name: 'npsApprovalFiles', maxCount: 10 },
+  { name: 'msdsFiles', maxCount: 10 },
+  { name: 'certificationsFiles', maxCount: 10 }
 ]), async (req, res) => {
   try {
     const { productId } = req.params;
@@ -1119,7 +1150,7 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
         }
       }
 
-      // Handle other file updates similarly...
+      // Handle other file updates
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
         try {
           const npsUrls = [];
@@ -1217,37 +1248,6 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
     });
   }
 });
-
-// Enhanced file filter with better validation
-const enhancedFileFilter = (req, file, cb) => {
-  console.log('File filter check:', {
-    fieldname: file.fieldname,
-    mimetype: file.mimetype,
-    originalname: file.originalname
-  });
-
-  if (file.fieldname === 'image') {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error(`Invalid image file type: ${file.mimetype}. Only image files are allowed.`));
-    }
-  } else if (['npsApprovalFiles', 'msdsFiles', 'certificationsFiles'].includes(file.fieldname)) {
-    const allowedTypes = [
-      'application/pdf', 
-      'application/msword', 
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'text/plain'
-    ];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`Invalid document file type: ${file.mimetype}. Only PDF, DOC, DOCX, and TXT files are allowed.`));
-    }
-  } else {
-    cb(new Error(`Unknown field: ${file.fieldname}`));
-  }
-};
 
 app.delete('/api/products/:productId', authenticateToken, async (req, res) => {
   try {
@@ -1552,6 +1552,45 @@ app.get('/api/analytics/dashboard', authenticateToken, async (req, res) => {
   }
 });
 
+// Debug route to check Cloudinary configuration
+app.get('/api/debug/cloudinary', authenticateToken, async (req, res) => {
+  try {
+    if (!USE_CLOUDINARY) {
+      return res.json({
+        success: true,
+        message: 'Cloudinary is disabled',
+        config: { useCloudinary: false }
+      });
+    }
+
+    // Test Cloudinary connection
+    const result = await cloudinary.api.ping();
+    
+    res.json({
+      success: true,
+      message: 'Cloudinary configuration is valid',
+      config: {
+        cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+        apiKeyExists: !!process.env.CLOUDINARY_API_KEY,
+        apiSecretExists: !!process.env.CLOUDINARY_API_SECRET,
+        connectionTest: result
+      }
+    });
+  } catch (error) {
+    console.error('Cloudinary debug error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Cloudinary configuration error',
+      error: error.message,
+      config: {
+        cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+        apiKeyExists: !!process.env.CLOUDINARY_API_KEY,
+        apiSecretExists: !!process.env.CLOUDINARY_API_SECRET
+      }
+    });
+  }
+});
+
 // Storage info route
 app.get('/api/storage-info', (req, res) => {
   res.json({
@@ -1664,7 +1703,9 @@ app.use((req, res) => {
       'DELETE /api/batches/:batchId',
       'GET /api/product-view/:batchId',
       'GET /api/analytics/dashboard',
-      'GET /api/storage-info'
+      'GET /api/storage-info',
+      'GET /api/debug/cloudinary',
+      'GET /api/debug/counts'
     ]
   });
 });
@@ -1719,6 +1760,7 @@ app.listen(PORT, async () => {
   console.log(`   GET  /api/products - Get all products`);
   console.log(`   GET  /api/product-view/:batchId - Public product view`);
   console.log(`   GET  /api/analytics/dashboard - Analytics`);
+  console.log(`   GET  /api/debug/cloudinary - Cloudinary debug`);
   console.log('🚀 ===================================');
   
   await initializeAdmin();
