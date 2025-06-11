@@ -24,30 +24,39 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/fertilize
 });
 
 mongoose.connection.on('connected', () => {
-  console.log('Connected to MongoDB');
+  console.log('✅ Connected to MongoDB');
 });
 
 mongoose.connection.on('error', (err) => {
-  console.error('MongoDB connection error:', err);
+  console.error('❌ MongoDB connection error:', err);
 });
 
-// Middleware
+// Enhanced CORS Configuration
 app.use(cors({
   origin: [
     'http://localhost:3000', 
     'http://localhost:3001', 
     'http://localhost:5173',
+    'https://farmersferts.com',
+    'https://www.farmersferts.com',
+    'https://api.farmersferts.com',
     process.env.FRONTEND_URL
   ].filter(Boolean),
   credentials: true,
   optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
 }));
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Middleware
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(cookieParser());
+
+// Trust proxy for production
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
 
 // Local Storage Setup
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -75,37 +84,35 @@ if (USE_CLOUDINARY) {
   console.log('💾 Local file storage configured');
 }
 
-// Storage Configuration
+// Enhanced Storage Configuration
 let upload;
 
 if (USE_CLOUDINARY) {
-  // Cloudinary Storage
-  const imageStorage = new CloudinaryStorage({
-    cloudinary: cloudinary,
-    params: {
-      folder: 'famerce/products',
-      allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-      transformation: [
-        { width: 800, height: 600, crop: 'limit', quality: 'auto' }
-      ]
-    }
-  });
-
-  const documentStorage = new CloudinaryStorage({
-    cloudinary: cloudinary,
-    params: {
-      folder: 'famerce/documents',
-      allowed_formats: ['pdf', 'doc', 'docx'],
-      resource_type: 'raw'
-    }
-  });
-
   upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 10 * 1024 * 1024 }
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+    fileFilter: function (req, file, cb) {
+      if (file.fieldname === 'image') {
+        if (file.mimetype.startsWith('image/')) {
+          cb(null, true);
+        } else {
+          cb(new Error('Only image files are allowed for product images'));
+        }
+      } else {
+        const allowedTypes = [
+          'application/pdf', 
+          'application/msword', 
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        ];
+        if (allowedTypes.includes(file.mimetype)) {
+          cb(null, true);
+        } else {
+          cb(new Error('Only PDF, DOC, and DOCX files are allowed for documents'));
+        }
+      }
+    }
   });
 } else {
-  // Local Storage
   const storage = multer.diskStorage({
     destination: function (req, file, cb) {
       let uploadPath = 'uploads/';
@@ -127,7 +134,7 @@ if (USE_CLOUDINARY) {
   upload = multer({ 
     storage: storage,
     limits: {
-      fileSize: 5 * 1024 * 1024 // 5MB limit
+      fileSize: 50 * 1024 * 1024 // 50MB limit
     },
     fileFilter: function (req, file, cb) {
       if (file.fieldname === 'image') {
@@ -137,7 +144,11 @@ if (USE_CLOUDINARY) {
           cb(new Error('Only image files are allowed for product images'));
         }
       } else {
-        const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+        const allowedTypes = [
+          'application/pdf', 
+          'application/msword', 
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        ];
         if (allowedTypes.includes(file.mimetype)) {
           cb(null, true);
         } else {
@@ -148,7 +159,7 @@ if (USE_CLOUDINARY) {
   });
 }
 
-// File Upload Handler for Cloudinary
+// Enhanced File Upload Handler for Cloudinary
 const handleFileUpload = async (file, type = 'document') => {
   if (!USE_CLOUDINARY) {
     throw new Error('Cloudinary upload called but not configured');
@@ -158,11 +169,13 @@ const handleFileUpload = async (file, type = 'document') => {
     const uploadOptions = {
       folder: type === 'image' ? 'famerce/products' : 'famerce/documents',
       resource_type: type === 'image' ? 'image' : 'raw',
+      use_filename: true,
+      unique_filename: true,
     };
 
     if (type === 'image') {
       uploadOptions.transformation = [
-        { width: 800, height: 600, crop: 'limit', quality: 'auto' }
+        { width: 1200, height: 900, crop: 'limit', quality: 'auto:good' }
       ];
     }
 
@@ -170,6 +183,7 @@ const handleFileUpload = async (file, type = 'document') => {
       uploadOptions,
       (error, result) => {
         if (error) {
+          console.error('Cloudinary upload error:', error);
           reject(error);
         } else {
           resolve(result.secure_url);
@@ -181,27 +195,44 @@ const handleFileUpload = async (file, type = 'document') => {
   });
 };
 
-// Schemas
+// Enhanced Schemas
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
     unique: true,
-    trim: true
+    trim: true,
+    minlength: 3,
+    maxlength: 50
   },
   password: {
     type: String,
-    required: true
+    required: true,
+    minlength: 6
   },
   role: {
     type: String,
     default: 'admin',
-    enum: ['admin', 'user']
+    enum: ['admin', 'user', 'manager']
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  lastLogin: {
+    type: Date
   },
   createdAt: {
     type: Date,
     default: Date.now
   }
+});
+
+// Hash password before saving
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 12);
+  next();
 });
 
 const User = mongoose.model('User', userSchema);
@@ -211,23 +242,31 @@ const productSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    trim: true
+    trim: true,
+    index: true
   },
   name: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    maxlength: 200
   },
-  shortDescription: String,
-  fullDescription: String,
+  shortDescription: {
+    type: String,
+    maxlength: 500
+  },
+  fullDescription: {
+    type: String,
+    maxlength: 2000
+  },
   imagePath: String,
   npsApproval: String,
   msds: String,
   composition: {
     title: { type: String, default: "Composition" },
     ingredients: [{
-      name: String,
-      percentage: String
+      name: { type: String, required: true },
+      percentage: { type: String, required: true }
     }],
     advantages: [String]
   },
@@ -258,6 +297,10 @@ const productSchema = new mongoose.Schema({
     email: String,
     website: String
   },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -267,6 +310,10 @@ const productSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+// Create indexes for better performance
+productSchema.index({ productId: 1 });
+productSchema.index({ name: 'text', shortDescription: 'text' });
 
 productSchema.pre('save', function(next) {
   this.updatedAt = Date.now();
@@ -280,27 +327,56 @@ const batchSchema = new mongoose.Schema({
     type: String,
     unique: true,
     uppercase: true,
+    index: true
   },
   productId: {
     type: String,
     required: true,
-    ref: 'Product'
+    ref: 'Product',
+    index: true
   },
   number: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    maxlength: 100
   },
   sampleNo: {
     type: String,
-    trim: true
+    trim: true,
+    maxlength: 100
   },
-  manufacturingDate: Date,
-  expiryDate: Date,
+  manufacturingDate: {
+    type: Date,
+    validate: {
+      validator: function(v) {
+        return !v || v <= new Date();
+      },
+      message: 'Manufacturing date cannot be in the future'
+    }
+  },
+  expiryDate: {
+    type: Date,
+    validate: {
+      validator: function(v) {
+        if (!v || !this.manufacturingDate) return true;
+        return v > this.manufacturingDate;
+      },
+      message: 'Expiry date must be after manufacturing date'
+    }
+  },
   availablePackageSizes: [String],
   isExpired: {
     type: Boolean,
     default: false
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  notes: {
+    type: String,
+    maxlength: 1000
   },
   createdAt: {
     type: Date,
@@ -312,24 +388,37 @@ const batchSchema = new mongoose.Schema({
   }
 });
 
-// Function to generate short batch ID
+// Create compound index for better performance
+batchSchema.index({ productId: 1, number: 1 }, { unique: true });
+batchSchema.index({ batchId: 1 });
+batchSchema.index({ expiryDate: 1 });
+
+// Enhanced batch ID generation
 async function generateShortBatchId() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let batchId = '';
+  let attempts = 0;
+  const maxAttempts = 10;
   
-  for (let i = 0; i < 8; i++) {
-    batchId += chars.charAt(Math.floor(Math.random() * chars.length));
+  while (attempts < maxAttempts) {
+    let batchId = '';
+    for (let i = 0; i < 8; i++) {
+      batchId += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
+    const existingBatch = await Batch.findOne({ batchId: batchId });
+    if (!existingBatch) {
+      return batchId;
+    }
+    
+    attempts++;
   }
   
-  const existingBatch = await Batch.findOne({ batchId: batchId });
-  if (existingBatch) {
-    return generateShortBatchId();
-  }
-  
-  return batchId;
+  // Fallback with timestamp
+  const timestamp = Date.now().toString(36).toUpperCase();
+  return 'B' + timestamp;
 }
 
-// Pre-save middleware for batches
+// Enhanced pre-save middleware for batches
 batchSchema.pre('save', async function(next) {
   this.updatedAt = Date.now();
   
@@ -341,6 +430,7 @@ batchSchema.pre('save', async function(next) {
     }
   }
   
+  // Auto-calculate expiry status
   if (this.expiryDate) {
     this.isExpired = new Date() > new Date(this.expiryDate);
   }
@@ -348,53 +438,71 @@ batchSchema.pre('save', async function(next) {
   next();
 });
 
+// Virtual for expiry status
 batchSchema.virtual('expired').get(function() {
   if (!this.expiryDate) return false;
   return new Date() > new Date(this.expiryDate);
 });
 
+batchSchema.virtual('daysUntilExpiry').get(function() {
+  if (!this.expiryDate) return null;
+  const today = new Date();
+  const expiry = new Date(this.expiryDate);
+  const diffTime = expiry - today;
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+});
+
 const Batch = mongoose.model('Batch', batchSchema);
 
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-here';
+// Enhanced JWT Secret
+const JWT_SECRET = process.env.JWT_SECRET || 'farmers-fert-secret-key-' + Date.now();
 
-// Authentication middleware
+// Enhanced authentication middleware
 const authenticateToken = (req, res, next) => {
-  const token = req.cookies.token || req.headers.authorization?.split(' ')[1];
+  const authHeader = req.headers.authorization;
+  const token = req.cookies.token || (authHeader && authHeader.split(' ')[1]);
 
   if (!token) {
-    return res.status(401).json({ success: false, message: 'Access token required' });
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Access token required' 
+    });
   }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      return res.status(403).json({ success: false, message: 'Invalid or expired token' });
+      console.error('JWT verification error:', err);
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Invalid or expired token' 
+      });
     }
     req.user = user;
     next();
   });
 };
 
-// Initialize admin user
+// Enhanced admin initialization
 const initializeAdmin = async () => {
   try {
     const adminExists = await User.findOne({ username: 'admin' });
     if (!adminExists) {
-      const hashedPassword = await bcrypt.hash('admin123', 10);
       const admin = new User({
         username: 'admin',
-        password: hashedPassword,
+        password: 'admin123',
         role: 'admin'
       });
       await admin.save();
-      console.log('Default admin user created: username=admin, password=admin123');
+      console.log('✅ Default admin user created: username=admin, password=admin123');
+    } else {
+      console.log('✅ Admin user already exists');
     }
   } catch (error) {
-    console.error('Error creating admin user:', error);
+    console.error('❌ Error creating admin user:', error);
   }
 };
 
-// Migration function for existing batches
+// Enhanced migration function
 const updateExistingBatches = async () => {
   try {
     const batches = await Batch.find({ 
@@ -406,7 +514,7 @@ const updateExistingBatches = async () => {
     });
     
     if (batches.length > 0) {
-      console.log(`Found ${batches.length} batches without batchId. Updating...`);
+      console.log(`🔄 Found ${batches.length} batches without batchId. Updating...`);
       
       for (let batch of batches) {
         try {
@@ -414,67 +522,101 @@ const updateExistingBatches = async () => {
             batch.batchId = await generateShortBatchId();
           }
           
-          await batch.save({ validateBeforeSave: false });
           await batch.save();
-          
-          console.log(`Updated batch ${batch.number} with batchId: ${batch.batchId}`);
+          console.log(`✅ Updated batch ${batch.number} with batchId: ${batch.batchId}`);
         } catch (batchError) {
-          console.error(`Error updating batch ${batch.number}:`, batchError.message);
+          console.error(`❌ Error updating batch ${batch.number}:`, batchError.message);
           continue;
         }
       }
       
-      console.log(`Successfully updated ${batches.length} existing batches with new batchId`);
+      console.log(`✅ Successfully updated ${batches.length} existing batches`);
+    } else {
+      console.log('✅ All batches have valid batchId');
     }
   } catch (error) {
-    console.error('Error in updateExistingBatches:', error);
+    console.error('❌ Error in updateExistingBatches:', error);
   }
 };
 
-// ROUTES
+// ENHANCED ROUTES
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    storage: USE_CLOUDINARY ? 'cloudinary' : 'local',
-    cloudinary: USE_CLOUDINARY ? (process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured') : 'disabled'
-  });
+// Health check with detailed info
+app.get('/health', async (req, res) => {
+  try {
+    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    const productCount = await Product.countDocuments();
+    const batchCount = await Batch.countDocuments();
+    
+    res.json({ 
+      status: 'OK', 
+      timestamp: new Date().toISOString(),
+      database: {
+        status: dbStatus,
+        products: productCount,
+        batches: batchCount
+      },
+      storage: USE_CLOUDINARY ? 'cloudinary' : 'local',
+      cloudinary: USE_CLOUDINARY ? (process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured') : 'disabled',
+      environment: process.env.NODE_ENV || 'development'
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      message: error.message
+    });
+  }
 });
 
-// File Access Routes (Cloudinary only)
+// Enhanced File Access Routes for Cloudinary
 if (USE_CLOUDINARY) {
-  app.get('/api/files/:type/:publicId(*)', (req, res) => {
+  // Image proxy route
+  app.get('/api/files/image/:filename(*)', (req, res) => {
     try {
-      const { type, publicId } = req.params;
+      const { filename } = req.params;
       
-      const folder = type === 'image' ? 'famerce/products' : 'famerce/documents';
-      const resourceType = type === 'image' ? 'image' : 'raw';
-      
-      const cloudinaryUrl = cloudinary.url(`${folder}/${publicId}`, {
-        resource_type: resourceType,
-        secure: true
+      const cloudinaryUrl = cloudinary.url(`famerce/products/${filename}`, {
+        resource_type: 'image',
+        secure: true,
+        fetch_format: 'auto',
+        quality: 'auto'
       });
       
       res.redirect(cloudinaryUrl);
       
     } catch (error) {
-      console.error('File access error:', error);
+      console.error('Image access error:', error);
       res.status(500).json({ 
         success: false, 
-        message: 'Failed to access file',
+        message: 'Failed to access image',
         error: error.message 
       });
     }
   });
 
-  app.get('/api/documents/download-url/:publicId', async (req, res) => {
+  // Document download routes
+  app.post('/api/documents/get-signed-url', async (req, res) => {
     try {
-      const { publicId } = req.params;
+      const { filePath, type = 'documents' } = req.body;
       
-      const downloadUrl = cloudinary.url(`famerce/documents/${publicId}`, {
+      if (!filePath) {
+        return res.status(400).json({
+          success: false,
+          message: 'File path is required'
+        });
+      }
+
+      // Extract filename from various path formats
+      let filename = filePath;
+      if (filePath.includes('/')) {
+        const segments = filePath.split('/');
+        filename = segments[segments.length - 1];
+      }
+      if (filename.includes(',')) {
+        filename = filename.split(',')[0].trim();
+      }
+
+      const downloadUrl = cloudinary.url(`famerce/${type}/${filename}`, {
         resource_type: 'raw',
         secure: true,
         flags: 'attachment'
@@ -482,70 +624,74 @@ if (USE_CLOUDINARY) {
       
       res.json({
         success: true,
-        downloadUrl
+        signedUrl: downloadUrl,
+        actualPath: `famerce/${type}/${filename}`
       });
       
     } catch (error) {
-      console.error('Download URL error:', error);
+      console.error('Signed URL error:', error);
       res.status(500).json({
         success: false,
-        message: 'Failed to generate download URL',
+        message: 'Failed to generate signed URL',
         error: error.message
       });
     }
   });
 
-  app.get('/api/debug/list-files/:type?', async (req, res) => {
+  app.get('/api/documents/signed-url/:type/:filename(*)', async (req, res) => {
     try {
-      const { type } = req.params;
+      const { type, filename } = req.params;
       
-      const searchOptions = {
-        type: 'upload',
-        max_results: 50
-      };
-      
-      if (type) {
-        searchOptions.prefix = `famerce/${type}`;
-      } else {
-        searchOptions.prefix = 'famerce';
-      }
-      
-      const result = await cloudinary.search
-        .expression(`folder:${searchOptions.prefix}`)
-        .max_results(searchOptions.max_results)
-        .execute();
-      
-      const files = result.resources.map(resource => ({
-        public_id: resource.public_id,
-        secure_url: resource.secure_url,
-        resource_type: resource.resource_type,
-        format: resource.format,
-        bytes: resource.bytes,
-        created_at: resource.created_at
-      }));
+      const downloadUrl = cloudinary.url(`famerce/${type}/${filename}`, {
+        resource_type: 'raw',
+        secure: true,
+        flags: 'attachment'
+      });
       
       res.json({
         success: true,
-        files,
-        total: result.total_count
+        signedUrl: downloadUrl
       });
       
     } catch (error) {
-      console.error('List files error:', error);
+      console.error('Document URL error:', error);
       res.status(500).json({
         success: false,
-        message: 'Failed to list files',
+        message: 'Failed to generate document URL',
+        error: error.message
+      });
+    }
+  });
+
+  app.get('/api/documents/download/:type/:filename(*)', (req, res) => {
+    try {
+      const { type, filename } = req.params;
+      
+      const downloadUrl = cloudinary.url(`famerce/${type}/${filename}`, {
+        resource_type: 'raw',
+        secure: true,
+        flags: 'attachment'
+      });
+      
+      res.redirect(downloadUrl);
+      
+    } catch (error) {
+      console.error('Document download error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to download document',
         error: error.message
       });
     }
   });
 }
 
-// Authentication routes
+// Enhanced Authentication Routes
 app.post('/signin', async (req, res) => {
   try {
     const { username, password, rememberMe } = req.body;
 
+    // Validation
     if (!username || !password) {
       return res.status(400).json({ 
         success: false, 
@@ -553,7 +699,12 @@ app.post('/signin', async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ username: username.trim() });
+    // Find user
+    const user = await User.findOne({ 
+      username: username.trim(), 
+      isActive: true 
+    });
+    
     if (!user) {
       return res.status(401).json({ 
         success: false, 
@@ -561,6 +712,7 @@ app.post('/signin', async (req, res) => {
       });
     }
 
+    // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       return res.status(401).json({ 
@@ -569,6 +721,11 @@ app.post('/signin', async (req, res) => {
       });
     }
 
+    // Update last login
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Generate token
     const token = jwt.sign(
       { 
         userId: user._id, 
@@ -579,10 +736,11 @@ app.post('/signin', async (req, res) => {
       { expiresIn: rememberMe ? '30d' : '24h' }
     );
 
+    // Set cookie
     const cookieOptions = {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000
     };
 
@@ -594,7 +752,8 @@ app.post('/signin', async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        role: user.role
+        role: user.role,
+        lastLogin: user.lastLogin
       },
       token
     });
@@ -608,29 +767,62 @@ app.post('/signin', async (req, res) => {
 });
 
 app.post('/signout', (req, res) => {
-  res.clearCookie('token');
+  res.clearCookie('token', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+  });
   res.json({ success: true, message: 'Logout successful' });
 });
 
-app.get('/auth/check', authenticateToken, (req, res) => {
-  res.json({
-    authenticated: true,
-    user: {
-      id: req.user.userId,
-      username: req.user.username,
-      role: req.user.role
+app.get('/auth/check', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('-password');
+    if (!user || !user.isActive) {
+      return res.status(401).json({ authenticated: false });
     }
-  });
+
+    res.json({
+      authenticated: true,
+      user: {
+        id: user._id,
+        username: user.username,
+        role: user.role,
+        lastLogin: user.lastLogin
+      }
+    });
+  } catch (error) {
+    console.error('Auth check error:', error);
+    res.status(500).json({ authenticated: false });
+  }
 });
 
-// Product routes
+// Enhanced Product Routes
 app.get('/api/products', authenticateToken, async (req, res) => {
   try {
-    const products = await Product.find().sort({ createdAt: -1 });
+    const { page = 1, limit = 50, search = '' } = req.query;
+    
+    let query = { isActive: true };
+    
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { productId: { $regex: search, $options: 'i' } },
+        { shortDescription: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    const products = await Product.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
     
     const productsWithBatches = await Promise.all(
       products.map(async (product) => {
-        const batches = await Batch.find({ productId: product.productId }).sort({ createdAt: -1 });
+        const batches = await Batch.find({ 
+          productId: product.productId, 
+          isActive: true 
+        }).sort({ createdAt: -1 });
         
         const now = new Date();
         const summary = {
@@ -662,15 +854,24 @@ app.get('/api/products', authenticateToken, async (req, res) => {
       })
     );
 
+    const total = await Product.countDocuments(query);
+
     res.json({
       success: true,
-      products: productsWithBatches
+      products: productsWithBatches,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
     });
   } catch (error) {
     console.error('Get products error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to fetch products' 
+      message: 'Failed to fetch products',
+      error: error.message 
     });
   }
 });
@@ -684,6 +885,15 @@ app.post('/api/products', authenticateToken, upload.fields([
   try {
     const productData = JSON.parse(req.body.productData);
     
+    // Validate required fields
+    if (!productData.productId || !productData.name) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Product ID and name are required' 
+      });
+    }
+
+    // Check for existing product
     const existingProduct = await Product.findOne({ productId: productData.productId });
     if (existingProduct) {
       return res.status(400).json({ 
@@ -692,7 +902,7 @@ app.post('/api/products', authenticateToken, upload.fields([
       });
     }
 
-    // Handle file uploads based on storage type
+    // Handle file uploads
     if (USE_CLOUDINARY) {
       const uploadPromises = [];
 
@@ -701,44 +911,65 @@ app.post('/api/products', authenticateToken, upload.fields([
         uploadPromises.push(
           handleFileUpload(req.files.image[0], 'image').then(url => {
             productData.imagePath = url;
+          }).catch(err => {
+            console.error('Image upload error:', err);
+            throw new Error('Failed to upload image');
           })
         );
       }
 
       // Upload NPS approval files
       if (req.files['npsApprovalFiles[]']) {
-        req.files['npsApprovalFiles[]'].forEach(file => {
+        const npsUrls = [];
+        for (const file of req.files['npsApprovalFiles[]']) {
           uploadPromises.push(
-            handleFileUpload(file, 'document').then(url => {
-              productData.npsApproval = productData.npsApproval ? `${productData.npsApproval}, ${url}` : url;
+            handleFileUpload(file, 'documents').then(url => {
+              npsUrls.push(url);
+            }).catch(err => {
+              console.error('NPS file upload error:', err);
+              throw new Error('Failed to upload NPS approval files');
             })
           );
-        });
+        }
+        await Promise.all(uploadPromises.slice(-req.files['npsApprovalFiles[]'].length));
+        productData.npsApproval = npsUrls.join(', ');
       }
 
       // Upload MSDS files  
       if (req.files['msdsFiles[]']) {
-        req.files['msdsFiles[]'].forEach(file => {
+        const msdsUrls = [];
+        for (const file of req.files['msdsFiles[]']) {
           uploadPromises.push(
-            handleFileUpload(file, 'document').then(url => {
-              productData.msds = productData.msds ? `${productData.msds}, ${url}` : url;
+            handleFileUpload(file, 'documents').then(url => {
+              msdsUrls.push(url);
+            }).catch(err => {
+              console.error('MSDS file upload error:', err);
+              throw new Error('Failed to upload MSDS files');
             })
           );
-        });
+        }
+        await Promise.all(uploadPromises.slice(-req.files['msdsFiles[]'].length));
+        productData.msds = msdsUrls.join(', ');
       }
 
       // Upload certification files
       if (req.files['certificationsFiles[]']) {
-        req.files['certificationsFiles[]'].forEach(file => {
+        const certUrls = [];
+        for (const file of req.files['certificationsFiles[]']) {
           uploadPromises.push(
-            handleFileUpload(file, 'document').then(url => {
-              productData.certifications = productData.certifications || { qualityStandards: '' };
-              productData.certifications.qualityStandards = productData.certifications.qualityStandards
-                ? `${productData.certifications.qualityStandards}, ${url}`
-                : url;
+            handleFileUpload(file, 'documents').then(url => {
+              certUrls.push(url);
+            }).catch(err => {
+              console.error('Certification file upload error:', err);
+              throw new Error('Failed to upload certification files');
             })
           );
-        });
+        }
+        await Promise.all(uploadPromises.slice(-req.files['certificationsFiles[]'].length));
+        if (certUrls.length > 0) {
+          productData.certifications = productData.certifications || {};
+          productData.certifications.qualityStandards = certUrls.join(', ');
+        }
       }
 
       await Promise.all(uploadPromises);
@@ -749,15 +980,16 @@ app.post('/api/products', authenticateToken, upload.fields([
       }
 
       if (req.files['npsApprovalFiles[]']) {
-        productData.npsApproval = req.files['npsApprovalFiles[]'].map(file => file.filename).join(', ');
+        productData.npsApproval = req.files['npsApprovalFiles[]'].map(file => `/uploads/documents/${file.filename}`).join(', ');
       }
 
       if (req.files['msdsFiles[]']) {
-        productData.msds = req.files['msdsFiles[]'].map(file => file.filename).join(', ');
+        productData.msds = req.files['msdsFiles[]'].map(file => `/uploads/documents/${file.filename}`).join(', ');
       }
 
       if (req.files['certificationsFiles[]']) {
-        productData.certifications.qualityStandards = req.files['certificationsFiles[]'].map(file => file.filename).join(', ');
+        productData.certifications = productData.certifications || {};
+        productData.certifications.qualityStandards = req.files['certificationsFiles[]'].map(file => `/uploads/documents/${file.filename}`).join(', ');
       }
     }
 
@@ -773,7 +1005,8 @@ app.post('/api/products', authenticateToken, upload.fields([
     console.error('Create product error:', error);
     res.status(500).json({ 
       success: false, 
-      message: error.message || 'Failed to create product' 
+      message: error.message || 'Failed to create product',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
@@ -796,7 +1029,7 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
       });
     }
 
-    // Handle file uploads based on storage type
+    // Handle file uploads
     if (USE_CLOUDINARY) {
       const uploadPromises = [];
 
@@ -804,41 +1037,62 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
         uploadPromises.push(
           handleFileUpload(req.files.image[0], 'image').then(url => {
             productData.imagePath = url;
+          }).catch(err => {
+            console.error('Image upload error:', err);
+            throw new Error('Failed to upload image');
           })
         );
       }
 
       if (req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        req.files.npsApprovalFiles.forEach(file => {
+        const npsUrls = [];
+        for (const file of req.files.npsApprovalFiles) {
           uploadPromises.push(
-            handleFileUpload(file, 'document').then(url => {
-              productData.npsApproval = productData.npsApproval ? `${productData.npsApproval}, ${url}` : url;
+            handleFileUpload(file, 'documents').then(url => {
+              npsUrls.push(url);
+            }).catch(err => {
+              console.error('NPS file upload error:', err);
+              throw new Error('Failed to upload NPS approval files');
             })
           );
-        });
+        }
+        await Promise.all(uploadPromises.slice(-req.files.npsApprovalFiles.length));
+        productData.npsApproval = npsUrls.join(', ');
       }
 
       if (req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        req.files.msdsFiles.forEach(file => {
+        const msdsUrls = [];
+        for (const file of req.files.msdsFiles) {
           uploadPromises.push(
-            handleFileUpload(file, 'document').then(url => {
-              productData.msds = productData.msds ? `${productData.msds}, ${url}` : url;
+            handleFileUpload(file, 'documents').then(url => {
+              msdsUrls.push(url);
+            }).catch(err => {
+              console.error('MSDS file upload error:', err);
+              throw new Error('Failed to upload MSDS files');
             })
           );
-        });
+        }
+        await Promise.all(uploadPromises.slice(-req.files.msdsFiles.length));
+        productData.msds = msdsUrls.join(', ');
       }
 
       if (req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        req.files.certificationsFiles.forEach(file => {
+        const certUrls = [];
+        for (const file of req.files.certificationsFiles) {
           uploadPromises.push(
-            handleFileUpload(file, 'document').then(url => {
-              productData.certifications = productData.certifications || { qualityStandards: '' };
-              productData.certifications.qualityStandards = productData.certifications.qualityStandards
-                ? `${productData.certifications.qualityStandards}, ${url}`
-                : url;
+            handleFileUpload(file, 'documents').then(url => {
+              certUrls.push(url);
+            }).catch(err => {
+              console.error('Certification file upload error:', err);
+              throw new Error('Failed to upload certification files');
             })
           );
-        });
+        }
+        await Promise.all(uploadPromises.slice(-req.files.certificationsFiles.length));
+        if (certUrls.length > 0) {
+          productData.certifications = productData.certifications || {};
+          productData.certifications.qualityStandards = certUrls.join(', ');
+        }
       }
 
       await Promise.all(uploadPromises);
@@ -849,15 +1103,16 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
       }
 
       if (req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        productData.npsApproval = req.files.npsApprovalFiles.map(file => file.filename).join(', ');
+        productData.npsApproval = req.files.npsApprovalFiles.map(file => `/uploads/documents/${file.filename}`).join(', ');
       }
 
       if (req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        productData.msds = req.files.msdsFiles.map(file => file.filename).join(', ');
+        productData.msds = req.files.msdsFiles.map(file => `/uploads/documents/${file.filename}`).join(', ');
       }
 
       if (req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        productData.certifications.qualityStandards = req.files.certificationsFiles.map(file => file.filename).join(', ');
+        productData.certifications = productData.certifications || {};
+        productData.certifications.qualityStandards = req.files.certificationsFiles.map(file => `/uploads/documents/${file.filename}`).join(', ');
       }
     }
 
@@ -876,7 +1131,8 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
     console.error('Update product error:', error);
     res.status(500).json({ 
       success: false, 
-      message: error.message || 'Failed to update product' 
+      message: error.message || 'Failed to update product',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
@@ -893,8 +1149,9 @@ app.delete('/api/products/:productId', authenticateToken, async (req, res) => {
       });
     }
 
-    await Batch.deleteMany({ productId });
-    await Product.deleteOne({ productId });
+    // Soft delete - mark as inactive
+    await Product.findOneAndUpdate({ productId }, { isActive: false });
+    await Batch.updateMany({ productId }, { isActive: false });
 
     res.json({
       success: true,
@@ -904,17 +1161,63 @@ app.delete('/api/products/:productId', authenticateToken, async (req, res) => {
     console.error('Delete product error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to delete product' 
+      message: 'Failed to delete product',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// Batch routes
+// Enhanced Batch Routes
+app.get('/api/batches', authenticateToken, async (req, res) => {
+  try {
+    const { productId, page = 1, limit = 50 } = req.query;
+    
+    let query = { isActive: true };
+    if (productId) {
+      query.productId = productId;
+    }
+    
+    const batches = await Batch.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    const total = await Batch.countDocuments(query);
+
+    res.json({
+      success: true,
+      batches,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Get batches error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch batches',
+      error: error.message 
+    });
+  }
+});
+
 app.post('/api/batches', authenticateToken, async (req, res) => {
   try {
-    const { productId, number, manufacturingDate, expiryDate } = req.body;
+    const { productId, number, manufacturingDate, expiryDate, sampleNo, availablePackageSizes, notes } = req.body;
 
-    const product = await Product.findOne({ productId });
+    // Validate required fields
+    if (!productId || !number) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Product ID and batch number are required' 
+      });
+    }
+
+    // Check if product exists
+    const product = await Product.findOne({ productId, isActive: true });
     if (!product) {
       return res.status(404).json({ 
         success: false, 
@@ -922,7 +1225,12 @@ app.post('/api/batches', authenticateToken, async (req, res) => {
       });
     }
 
-    const existingBatch = await Batch.findOne({ productId, number });
+    // Check for existing batch
+    const existingBatch = await Batch.findOne({ 
+      productId, 
+      number: number.trim(),
+      isActive: true 
+    });
     if (existingBatch) {
       return res.status(400).json({ 
         success: false, 
@@ -932,9 +1240,12 @@ app.post('/api/batches', authenticateToken, async (req, res) => {
 
     const batch = new Batch({
       productId,
-      number,
+      number: number.trim(),
+      sampleNo: sampleNo ? sampleNo.trim() : undefined,
       manufacturingDate: manufacturingDate || null,
-      expiryDate: expiryDate || null
+      expiryDate: expiryDate || null,
+      availablePackageSizes: availablePackageSizes || [],
+      notes: notes ? notes.trim() : undefined
     });
 
     await batch.save();
@@ -948,7 +1259,8 @@ app.post('/api/batches', authenticateToken, async (req, res) => {
     console.error('Create batch error:', error);
     res.status(500).json({ 
       success: false, 
-      message: error.message || 'Failed to create batch' 
+      message: error.message || 'Failed to create batch',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
@@ -956,9 +1268,9 @@ app.post('/api/batches', authenticateToken, async (req, res) => {
 app.put('/api/batches/:batchId', authenticateToken, async (req, res) => {
   try {
     const { batchId } = req.params;
-    const { number, manufacturingDate, expiryDate } = req.body;
+    const { number, manufacturingDate, expiryDate, sampleNo, availablePackageSizes, notes } = req.body;
 
-    const batch = await Batch.findOne({ batchId });
+    const batch = await Batch.findOne({ batchId, isActive: true });
     if (!batch) {
       return res.status(404).json({ 
         success: false, 
@@ -966,11 +1278,13 @@ app.put('/api/batches/:batchId', authenticateToken, async (req, res) => {
       });
     }
 
-    if (number && number !== batch.number) {
+    // Check for duplicate batch number if changing
+    if (number && number.trim() !== batch.number) {
       const existingBatch = await Batch.findOne({ 
         productId: batch.productId, 
-        number, 
-        batchId: { $ne: batchId } 
+        number: number.trim(), 
+        batchId: { $ne: batchId },
+        isActive: true
       });
       if (existingBatch) {
         return res.status(400).json({ 
@@ -983,9 +1297,12 @@ app.put('/api/batches/:batchId', authenticateToken, async (req, res) => {
     const updatedBatch = await Batch.findOneAndUpdate(
       { batchId },
       { 
-        number: number || batch.number,
+        number: number ? number.trim() : batch.number,
+        sampleNo: sampleNo !== undefined ? (sampleNo ? sampleNo.trim() : null) : batch.sampleNo,
         manufacturingDate: manufacturingDate !== undefined ? manufacturingDate : batch.manufacturingDate,
-        expiryDate: expiryDate !== undefined ? expiryDate : batch.expiryDate
+        expiryDate: expiryDate !== undefined ? expiryDate : batch.expiryDate,
+        availablePackageSizes: availablePackageSizes !== undefined ? availablePackageSizes : batch.availablePackageSizes,
+        notes: notes !== undefined ? (notes ? notes.trim() : null) : batch.notes
       },
       { new: true, runValidators: true }
     );
@@ -999,7 +1316,8 @@ app.put('/api/batches/:batchId', authenticateToken, async (req, res) => {
     console.error('Update batch error:', error);
     res.status(500).json({ 
       success: false, 
-      message: error.message || 'Failed to update batch' 
+      message: error.message || 'Failed to update batch',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
@@ -1008,7 +1326,7 @@ app.delete('/api/batches/:batchId', authenticateToken, async (req, res) => {
   try {
     const { batchId } = req.params;
 
-    const batch = await Batch.findOne({ batchId });
+    const batch = await Batch.findOne({ batchId, isActive: true });
     if (!batch) {
       return res.status(404).json({ 
         success: false, 
@@ -1016,7 +1334,8 @@ app.delete('/api/batches/:batchId', authenticateToken, async (req, res) => {
       });
     }
 
-    await Batch.findOneAndDelete({ batchId });
+    // Soft delete
+    await Batch.findOneAndUpdate({ batchId }, { isActive: false });
 
     res.json({
       success: true,
@@ -1026,35 +1345,40 @@ app.delete('/api/batches/:batchId', authenticateToken, async (req, res) => {
     console.error('Delete batch error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to delete batch' 
+      message: 'Failed to delete batch',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// Product view route (for QR code access)
+// Enhanced Product View Route (for QR code access)
 app.get('/api/product-view/:batchId', async (req, res) => {
   try {
     const { batchId } = req.params;
 
-    const batch = await Batch.findOne({ batchId });
+    const batch = await Batch.findOne({ batchId, isActive: true });
     if (!batch) {
       return res.status(404).json({ 
         success: false, 
-        message: 'Batch not found' 
+        message: 'Batch not found or inactive' 
       });
     }
 
-    const product = await Product.findOne({ productId: batch.productId });
+    const product = await Product.findOne({ productId: batch.productId, isActive: true });
     if (!product) {
       return res.status(404).json({ 
         success: false, 
-        message: 'Product not found' 
+        message: 'Product not found or inactive' 
       });
     }
 
+    // Update expiry status
     if (batch.expiryDate) {
-      batch.isExpired = new Date() > new Date(batch.expiryDate);
-      await batch.save();
+      const isExpired = new Date() > new Date(batch.expiryDate);
+      if (batch.isExpired !== isExpired) {
+        batch.isExpired = isExpired;
+        await batch.save();
+      }
     }
 
     res.json({
@@ -1068,38 +1392,143 @@ app.get('/api/product-view/:batchId', async (req, res) => {
     console.error('Get product view error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to fetch product information' 
+      message: 'Failed to fetch product information',
+      error: error.message
     });
   }
 });
 
-// Additional utility routes
+// Analytics Routes
+app.get('/api/analytics/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const stats = {
+      totalProducts: await Product.countDocuments({ isActive: true }),
+      totalBatches: await Batch.countDocuments({ isActive: true }),
+      expiredBatches: await Batch.countDocuments({ 
+        isActive: true, 
+        isExpired: true 
+      }),
+      expiringSoon: await Batch.countDocuments({ 
+        isActive: true, 
+        isExpired: false,
+        expiryDate: { $lte: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) }
+      }),
+      recentProducts: await Product.countDocuments({ 
+        isActive: true,
+        createdAt: { $gte: thirtyDaysAgo } 
+      }),
+      recentBatches: await Batch.countDocuments({ 
+        isActive: true,
+        createdAt: { $gte: thirtyDaysAgo } 
+      })
+    };
+
+    res.json({
+      success: true,
+      stats
+    });
+  } catch (error) {
+    console.error('Analytics error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch analytics',
+      error: error.message 
+    });
+  }
+});
+
+// Storage info route
 app.get('/api/storage-info', (req, res) => {
   res.json({
     success: true,
     storageType: USE_CLOUDINARY ? 'cloudinary' : 'local',
     config: {
       useCloudinary: USE_CLOUDINARY,
-      cloudinaryConfigured: USE_CLOUDINARY ? !!process.env.CLOUDINARY_CLOUD_NAME : false
+      cloudinaryConfigured: USE_CLOUDINARY ? !!process.env.CLOUDINARY_CLOUD_NAME : false,
+      environment: process.env.NODE_ENV || 'development'
     }
   });
 });
 
-// Error handling middleware
+// Utility Routes
+app.get('/api/debug/counts', authenticateToken, async (req, res) => {
+  try {
+    const counts = {
+      products: {
+        active: await Product.countDocuments({ isActive: true }),
+        inactive: await Product.countDocuments({ isActive: false }),
+        total: await Product.countDocuments()
+      },
+      batches: {
+        active: await Batch.countDocuments({ isActive: true }),
+        inactive: await Batch.countDocuments({ isActive: false }),
+        expired: await Batch.countDocuments({ isExpired: true }),
+        total: await Batch.countDocuments()
+      }
+    };
+
+    res.json({
+      success: true,
+      counts
+    });
+  } catch (error) {
+    console.error('Debug counts error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get counts',
+      error: error.message
+    });
+  }
+});
+
+// Enhanced Error Handling
 app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({ 
         success: false, 
-        message: 'File too large. Maximum size is 5MB.' 
+        message: 'File too large. Maximum size is 50MB.' 
+      });
+    }
+    if (error.code === 'LIMIT_FILE_COUNT') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Too many files uploaded.' 
       });
     }
   }
+
+  if (error.name === 'ValidationError') {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation error',
+      errors: Object.values(error.errors).map(err => err.message)
+    });
+  }
+
+  if (error.name === 'CastError') {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid ID format'
+    });
+  }
+
+  if (error.code === 11000) {
+    return res.status(400).json({
+      success: false,
+      message: 'Duplicate entry detected'
+    });
+  }
   
-  console.error('Unhandled error:', error);
   res.status(500).json({ 
     success: false, 
-    message: error.message || 'Internal server error' 
+    message: error.message || 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? error.stack : undefined
   });
 });
 
@@ -1107,32 +1536,81 @@ app.use((error, req, res, next) => {
 app.use((req, res) => {
   res.status(404).json({ 
     success: false, 
-    message: 'Route not found' 
+    message: `Route ${req.method} ${req.path} not found`,
+    availableRoutes: [
+      'GET /health',
+      'POST /signin',
+      'POST /signout',
+      'GET /auth/check',
+      'GET /api/products',
+      'POST /api/products',
+      'PUT /api/products/:productId',
+      'DELETE /api/products/:productId',
+      'GET /api/batches',
+      'POST /api/batches',
+      'PUT /api/batches/:batchId',
+      'DELETE /api/batches/:batchId',
+      'GET /api/product-view/:batchId',
+      'GET /api/analytics/dashboard',
+      'GET /api/storage-info'
+    ]
   });
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('🔄 SIGTERM received, shutting down gracefully...');
+  try {
+    await mongoose.connection.close();
+    console.log('✅ Database connection closed');
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error during shutdown:', error);
+    process.exit(1);
+  }
+});
+
+process.on('SIGINT', async () => {
+  console.log('🔄 SIGINT received, shutting down gracefully...');
+  try {
+    await mongoose.connection.close();
+    console.log('✅ Database connection closed');
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error during shutdown:', error);
+    process.exit(1);
+  }
 });
 
 // Start server
 app.listen(PORT, async () => {
+  console.log('🚀 ===================================');
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📁 Storage: ${USE_CLOUDINARY ? 'Cloudinary' : 'Local'}`);
   
   if (USE_CLOUDINARY) {
     console.log('🔗 Cloudinary file storage configured');
     console.log('📁 File access routes:');
-    console.log(`   GET  /api/files/:type/:publicId`);
-    console.log(`   GET  /api/documents/download-url/:publicId`);
-    console.log(`   GET  /api/debug/list-files/:type`);
+    console.log(`   GET  /api/files/image/:filename`);
+    console.log(`   POST /api/documents/get-signed-url`);
+    console.log(`   GET  /api/documents/signed-url/:type/:filename`);
+    console.log(`   GET  /api/documents/download/:type/:filename`);
   } else {
     console.log('💾 Local file storage configured');
     console.log(`📁 Static files served at: /uploads`);
   }
   
-  console.log('🔧 Additional routes:');
-  console.log(`   GET  /api/storage-info`);
-  console.log(`   GET  /health`);
+  console.log('🔧 API Routes:');
+  console.log(`   GET  /health - Health check`);
+  console.log(`   POST /signin - User authentication`);
+  console.log(`   GET  /api/products - Get all products`);
+  console.log(`   GET  /api/product-view/:batchId - Public product view`);
+  console.log(`   GET  /api/analytics/dashboard - Analytics`);
+  console.log('🚀 ===================================');
   
   await initializeAdmin();
   await updateExistingBatches();
+  
+  console.log('✅ Server initialization complete!');
 });
-
-module.exports = app;
