@@ -231,6 +231,7 @@ userSchema.pre('save', async function(next) {
 
 const User = mongoose.model('User', userSchema);
 
+// ENHANCED Product Schema with Dynamic Lists Support
 const productSchema = new mongoose.Schema({
   productId: {
     type: String,
@@ -266,7 +267,7 @@ const productSchema = new mongoose.Schema({
   },
   application: {
     title: { type: String, default: "Application Details" },
-    instructions: String,
+    instructions: [String], // ENHANCED: Changed from String to Array for dynamic lists
     recommendedCrops: [String]
   },
   safety: {
@@ -476,13 +477,118 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// ENHANCED Data Processing Helper Functions
+const processProductData = (productData) => {
+  console.log('🔄 Processing product data:', {
+    name: productData.name,
+    hasComposition: !!productData.composition,
+    hasApplication: !!productData.application,
+    hasSafety: !!productData.safety
+  });
+  
+  // Ensure arrays are properly formatted
+  if (productData.composition) {
+    // Process ingredients array
+    if (productData.composition.ingredients && Array.isArray(productData.composition.ingredients)) {
+      productData.composition.ingredients = productData.composition.ingredients.filter(ing => 
+        ing.name && ing.percentage && ing.name.trim() && ing.percentage.trim()
+      );
+      console.log('✅ Processed ingredients:', productData.composition.ingredients.length);
+    }
+    
+    // Process advantages array
+    if (productData.composition.advantages && Array.isArray(productData.composition.advantages)) {
+      productData.composition.advantages = productData.composition.advantages.filter(adv => 
+        adv && adv.trim()
+      );
+      console.log('✅ Processed advantages:', productData.composition.advantages.length);
+    }
+  }
+  
+  if (productData.application) {
+    // Process instructions array - ENHANCED
+    if (productData.application.instructions && Array.isArray(productData.application.instructions)) {
+      productData.application.instructions = productData.application.instructions.filter(inst => 
+        inst && inst.trim()
+      );
+      console.log('✅ Processed instructions:', productData.application.instructions.length);
+    }
+    
+    // Process recommended crops array
+    if (productData.application.recommendedCrops && Array.isArray(productData.application.recommendedCrops)) {
+      productData.application.recommendedCrops = productData.application.recommendedCrops.filter(crop => 
+        crop && crop.trim()
+      );
+      console.log('✅ Processed crops:', productData.application.recommendedCrops.length);
+    }
+  }
+  
+  if (productData.safety) {
+    // Process PPE instructions
+    if (productData.safety.ppe && productData.safety.ppe.instructions && Array.isArray(productData.safety.ppe.instructions)) {
+      productData.safety.ppe.instructions = productData.safety.ppe.instructions.filter(inst => 
+        inst && inst.trim()
+      );
+      console.log('✅ Processed PPE instructions:', productData.safety.ppe.instructions.length);
+    }
+    
+    // Process hygiene instructions
+    if (productData.safety.hygiene && productData.safety.hygiene.instructions && Array.isArray(productData.safety.hygiene.instructions)) {
+      productData.safety.hygiene.instructions = productData.safety.hygiene.instructions.filter(inst => 
+        inst && inst.trim()
+      );
+      console.log('✅ Processed hygiene instructions:', productData.safety.hygiene.instructions.length);
+    }
+  }
+  
+  if (productData.contact) {
+    // Process phone numbers array
+    if (productData.contact.phones && Array.isArray(productData.contact.phones)) {
+      productData.contact.phones = productData.contact.phones.filter(phone => 
+        phone && phone.trim()
+      );
+      console.log('✅ Processed phone numbers:', productData.contact.phones.length);
+    }
+  }
+  
+  return productData;
+};
+
+// Enhanced validation helper
+const validateProductData = (productData) => {
+  const errors = [];
+  
+  if (!productData.name || !productData.name.trim()) {
+    errors.push('Product name is required');
+  }
+  
+  // Validate ingredients format
+  if (productData.composition && productData.composition.ingredients) {
+    productData.composition.ingredients.forEach((ingredient, index) => {
+      if (!ingredient.name || !ingredient.percentage) {
+        errors.push(`Ingredient ${index + 1}: Both name and percentage are required`);
+      }
+    });
+  }
+  
+  // Validate email format if provided
+  if (productData.contact && productData.contact.email && productData.contact.email.trim()) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(productData.contact.email.trim())) {
+      errors.push('Invalid email format');
+    }
+  }
+  
+  return errors;
+};
+
 // FIXED File Upload Handler for Cloudinary
 const handleFileUpload = async (file, type = 'document') => {
   if (!USE_CLOUDINARY) {
     throw new Error('Cloudinary upload called but not configured');
   }
 
-  console.log(`Starting ${type} upload for file:`, file.originalname);
+  console.log(`📤 Starting ${type} upload for file:`, file.originalname);
 
   return new Promise((resolve, reject) => {
     // FIXED: Use proper folder structure without hardcoded cloud name
@@ -506,10 +612,10 @@ const handleFileUpload = async (file, type = 'document') => {
       uploadOptions,
       (error, result) => {
         if (error) {
-          console.error('Cloudinary upload error:', error);
+          console.error('❌ Cloudinary upload error:', error);
           reject(new Error(`Cloudinary upload failed: ${error.message}`));
         } else {
-          console.log('Cloudinary upload success:', result.secure_url);
+          console.log('✅ Cloudinary upload success:', result.secure_url);
           resolve(result.secure_url);
         }
       }
@@ -517,7 +623,7 @@ const handleFileUpload = async (file, type = 'document') => {
 
     // Handle stream errors
     uploadStream.on('error', (error) => {
-      console.error('Upload stream error:', error);
+      console.error('❌ Upload stream error:', error);
       reject(new Error(`Upload stream failed: ${error.message}`));
     });
 
@@ -923,7 +1029,7 @@ app.get('/api/products', authenticateToken, async (req, res) => {
   }
 });
 
-// FIXED Product Creation Route
+// ENHANCED Product Creation Route
 app.post('/api/products', authenticateToken, upload.fields([
   { name: 'image', maxCount: 1 },
   { name: 'npsApprovalFiles', maxCount: 10 },
@@ -931,17 +1037,20 @@ app.post('/api/products', authenticateToken, upload.fields([
   { name: 'certificationsFiles', maxCount: 10 }
 ]), async (req, res) => {
   try {
-    console.log('Received files:', req.files);
-    console.log('Received body:', req.body);
+    console.log('🆕 Creating new product...');
+    console.log('📁 Received files:', req.files);
+    console.log('📝 Received body keys:', Object.keys(req.body));
     
     let productData;
     try {
       productData = JSON.parse(req.body.productData);
+      console.log('✅ Parsed product data successfully');
     } catch (parseError) {
-      console.error('JSON parse error:', parseError);
+      console.error('❌ JSON parse error:', parseError);
       return res.status(400).json({ 
         success: false, 
-        message: 'Invalid product data format' 
+        message: 'Invalid product data format',
+        error: parseError.message
       });
     }
     
@@ -962,19 +1071,31 @@ app.post('/api/products', authenticateToken, upload.fields([
       });
     }
 
+    // Process and validate product data
+    productData = processProductData(productData);
+    const validationErrors = validateProductData(productData);
+    
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationErrors
+      });
+    }
+
     // Handle file uploads
     if (USE_CLOUDINARY) {
-      console.log('Using Cloudinary for file uploads');
+      console.log('🔗 Using Cloudinary for file uploads');
       
       // Upload image
       if (req.files && req.files.image && req.files.image[0]) {
         try {
-          console.log('Uploading image to Cloudinary...');
+          console.log('📸 Uploading image to Cloudinary...');
           const imageUrl = await handleFileUpload(req.files.image[0], 'image');
           productData.imagePath = imageUrl;
-          console.log('Image uploaded successfully:', imageUrl);
+          console.log('✅ Image uploaded successfully:', imageUrl);
         } catch (error) {
-          console.error('Image upload error:', error);
+          console.error('❌ Image upload error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to upload image: ' + error.message
@@ -985,16 +1106,16 @@ app.post('/api/products', authenticateToken, upload.fields([
       // Upload NPS approval files
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
         try {
-          console.log('Uploading NPS approval files...');
+          console.log('📄 Uploading NPS approval files...');
           const npsUrls = [];
           for (const file of req.files.npsApprovalFiles) {
             const url = await handleFileUpload(file, 'documents');
             npsUrls.push(url);
           }
           productData.npsApproval = npsUrls.join(', ');
-          console.log('NPS files uploaded successfully:', npsUrls);
+          console.log('✅ NPS files uploaded successfully:', npsUrls);
         } catch (error) {
-          console.error('NPS files upload error:', error);
+          console.error('❌ NPS files upload error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to upload NPS approval files: ' + error.message
@@ -1005,16 +1126,16 @@ app.post('/api/products', authenticateToken, upload.fields([
       // Upload MSDS files
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
         try {
-          console.log('Uploading MSDS files...');
+          console.log('📄 Uploading MSDS files...');
           const msdsUrls = [];
           for (const file of req.files.msdsFiles) {
             const url = await handleFileUpload(file, 'documents');
             msdsUrls.push(url);
           }
           productData.msds = msdsUrls.join(', ');
-          console.log('MSDS files uploaded successfully:', msdsUrls);
+          console.log('✅ MSDS files uploaded successfully:', msdsUrls);
         } catch (error) {
-          console.error('MSDS files upload error:', error);
+          console.error('❌ MSDS files upload error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to upload MSDS files: ' + error.message
@@ -1025,7 +1146,7 @@ app.post('/api/products', authenticateToken, upload.fields([
       // Upload certification files
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
         try {
-          console.log('Uploading certification files...');
+          console.log('📄 Uploading certification files...');
           const certUrls = [];
           for (const file of req.files.certificationsFiles) {
             const url = await handleFileUpload(file, 'documents');
@@ -1035,9 +1156,9 @@ app.post('/api/products', authenticateToken, upload.fields([
             productData.certifications = productData.certifications || {};
             productData.certifications.qualityStandards = certUrls.join(', ');
           }
-          console.log('Certification files uploaded successfully:', certUrls);
+          console.log('✅ Certification files uploaded successfully:', certUrls);
         } catch (error) {
-          console.error('Certification files upload error:', error);
+          console.error('❌ Certification files upload error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to upload certification files: ' + error.message
@@ -1046,25 +1167,25 @@ app.post('/api/products', authenticateToken, upload.fields([
       }
     } else {
       // Local file handling
-      console.log('Using local storage for file uploads');
+      console.log('💾 Using local storage for file uploads');
       
       if (req.files && req.files.image && req.files.image[0]) {
         productData.imagePath = `/uploads/products/${req.files.image[0].filename}`;
-        console.log('Image saved locally:', productData.imagePath);
+        console.log('✅ Image saved locally:', productData.imagePath);
       }
 
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
         productData.npsApproval = req.files.npsApprovalFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('NPS files saved locally:', productData.npsApproval);
+        console.log('✅ NPS files saved locally:', productData.npsApproval);
       }
 
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
         productData.msds = req.files.msdsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('MSDS files saved locally:', productData.msds);
+        console.log('✅ MSDS files saved locally:', productData.msds);
       }
 
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
@@ -1072,32 +1193,62 @@ app.post('/api/products', authenticateToken, upload.fields([
         productData.certifications.qualityStandards = req.files.certificationsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('Certification files saved locally:', productData.certifications.qualityStandards);
+        console.log('✅ Certification files saved locally:', productData.certifications.qualityStandards);
       }
     }
 
-    // Create the product
-    console.log('Creating product with data:', productData);
+    // Create the product with enhanced logging
+    console.log('💾 Creating product in database...');
+    console.log('📊 Product data structure:', {
+      productId: productData.productId,
+      name: productData.name,
+      hasImage: !!productData.imagePath,
+      compositionItems: {
+        ingredients: productData.composition?.ingredients?.length || 0,
+        advantages: productData.composition?.advantages?.length || 0
+      },
+      applicationItems: {
+        instructions: productData.application?.instructions?.length || 0,
+        crops: productData.application?.recommendedCrops?.length || 0
+      },
+      safetyItems: {
+        ppe: productData.safety?.ppe?.instructions?.length || 0,
+        hygiene: productData.safety?.hygiene?.instructions?.length || 0
+      }
+    });
+
     const product = new Product(productData);
     await product.save();
 
-    console.log('Product created successfully:', product._id);
+    console.log('✅ Product created successfully:', product._id);
     res.json({
       success: true,
       message: 'Product created successfully',
-      product
+      product,
+      stats: {
+        ingredientsCount: product.composition?.ingredients?.length || 0,
+        advantagesCount: product.composition?.advantages?.length || 0,
+        instructionsCount: product.application?.instructions?.length || 0,
+        cropsCount: product.application?.recommendedCrops?.length || 0,
+        ppeCount: product.safety?.ppe?.instructions?.length || 0,
+        hygieneCount: product.safety?.hygiene?.instructions?.length || 0,
+        phonesCount: product.contact?.phones?.length || 0
+      }
     });
   } catch (error) {
-    console.error('Create product error:', error);
+    console.error('❌ Create product error:', error);
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Failed to create product',
-      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: process.env.NODE_ENV === 'development' ? {
+        stack: error.stack,
+        name: error.name
+      } : undefined
     });
   }
 });
 
-// FIXED Update Product Route
+// ENHANCED Update Product Route with Dynamic Lists Support
 app.put('/api/products/:productId', authenticateToken, upload.fields([
   { name: 'image', maxCount: 1 },
   { name: 'npsApprovalFiles', maxCount: 10 },
@@ -1107,84 +1258,128 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
   try {
     const { productId } = req.params;
     
-    console.log('Update request for product:', productId);
-    console.log('Received files:', req.files);
-    console.log('Received body:', req.body);
+    console.log('🔄 Update request for product:', productId);
+    console.log('📁 Received files:', req.files);
+    console.log('📝 Received body keys:', Object.keys(req.body));
 
     let productData;
     try {
       productData = JSON.parse(req.body.productData);
+      console.log('✅ Parsed product data successfully');
     } catch (parseError) {
-      console.error('JSON parse error:', parseError);
+      console.error('❌ JSON parse error:', parseError);
       return res.status(400).json({ 
         success: false, 
-        message: 'Invalid product data format' 
+        message: 'Invalid product data format',
+        error: parseError.message
       });
     }
 
+    // Find existing product
     const existingProduct = await Product.findOne({ productId });
     if (!existingProduct) {
+      console.log('❌ Product not found:', productId);
       return res.status(404).json({ 
         success: false, 
         message: 'Product not found' 
       });
     }
 
-    // Handle file uploads (same logic as create but for update)
+    console.log('✅ Found existing product:', existingProduct.name);
+
+    // Process and validate product data
+    productData = processProductData(productData);
+    const validationErrors = validateProductData(productData);
+    
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationErrors
+      });
+    }
+
+    // Preserve existing file paths if no new files uploaded
+    const preserveExistingFiles = {
+      imagePath: existingProduct.imagePath,
+      npsApproval: existingProduct.npsApproval,
+      msds: existingProduct.msds,
+      qualityStandards: existingProduct.certifications?.qualityStandards
+    };
+
+    // Handle file uploads with enhanced error handling
     if (USE_CLOUDINARY) {
-      console.log('Using Cloudinary for file updates');
+      console.log('🔗 Using Cloudinary for file updates');
       
       // Update image if provided
       if (req.files && req.files.image && req.files.image[0]) {
         try {
-          console.log('Updating image...');
+          console.log('📸 Updating product image...');
           const imageUrl = await handleFileUpload(req.files.image[0], 'image');
           productData.imagePath = imageUrl;
-          console.log('Image updated successfully:', imageUrl);
+          console.log('✅ Image updated:', imageUrl);
         } catch (error) {
-          console.error('Image update error:', error);
+          console.error('❌ Image update error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to update image: ' + error.message
           });
         }
+      } else {
+        // Keep existing image
+        productData.imagePath = preserveExistingFiles.imagePath;
       }
 
-      // Handle other file updates
+      // Handle NPS approval files
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
         try {
+          console.log('📄 Updating NPS approval files...');
           const npsUrls = [];
           for (const file of req.files.npsApprovalFiles) {
             const url = await handleFileUpload(file, 'documents');
             npsUrls.push(url);
           }
           productData.npsApproval = npsUrls.join(', ');
+          console.log('✅ NPS files updated:', npsUrls.length, 'files');
         } catch (error) {
+          console.error('❌ NPS files update error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to update NPS approval files: ' + error.message
           });
         }
+      } else {
+        // Keep existing NPS files
+        productData.npsApproval = preserveExistingFiles.npsApproval;
       }
 
+      // Handle MSDS files
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
         try {
+          console.log('📄 Updating MSDS files...');
           const msdsUrls = [];
           for (const file of req.files.msdsFiles) {
             const url = await handleFileUpload(file, 'documents');
             msdsUrls.push(url);
           }
           productData.msds = msdsUrls.join(', ');
+          console.log('✅ MSDS files updated:', msdsUrls.length, 'files');
         } catch (error) {
+          console.error('❌ MSDS files update error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to update MSDS files: ' + error.message
           });
         }
+      } else {
+        // Keep existing MSDS files
+        productData.msds = preserveExistingFiles.msds;
       }
 
+      // Handle certification files
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
         try {
+          console.log('📄 Updating certification files...');
           const certUrls = [];
           for (const file of req.files.certificationsFiles) {
             const url = await handleFileUpload(file, 'documents');
@@ -1194,29 +1389,48 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
             productData.certifications = productData.certifications || {};
             productData.certifications.qualityStandards = certUrls.join(', ');
           }
+          console.log('✅ Certification files updated:', certUrls.length, 'files');
         } catch (error) {
+          console.error('❌ Certification files update error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to update certification files: ' + error.message
           });
         }
+      } else {
+        // Keep existing certification files
+        if (!productData.certifications) {
+          productData.certifications = {};
+        }
+        productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
       }
     } else {
       // Local file handling for updates
+      console.log('💾 Using local storage for file updates');
+      
       if (req.files && req.files.image && req.files.image[0]) {
         productData.imagePath = `/uploads/products/${req.files.image[0].filename}`;
+        console.log('✅ Image saved locally:', productData.imagePath);
+      } else {
+        productData.imagePath = preserveExistingFiles.imagePath;
       }
 
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
         productData.npsApproval = req.files.npsApprovalFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
+        console.log('✅ NPS files saved locally');
+      } else {
+        productData.npsApproval = preserveExistingFiles.npsApproval;
       }
 
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
         productData.msds = req.files.msdsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
+        console.log('✅ MSDS files saved locally');
+      } else {
+        productData.msds = preserveExistingFiles.msds;
       }
 
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
@@ -1224,27 +1438,81 @@ app.put('/api/products/:productId', authenticateToken, upload.fields([
         productData.certifications.qualityStandards = req.files.certificationsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
+        console.log('✅ Certification files saved locally');
+      } else {
+        if (!productData.certifications) {
+          productData.certifications = {};
+        }
+        productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
       }
     }
+
+    // Update the product with enhanced logging
+    console.log('💾 Updating product in database...');
+    console.log('📊 Final product data structure:', {
+      name: productData.name,
+      hasImage: !!productData.imagePath,
+      compositionItems: {
+        ingredients: productData.composition?.ingredients?.length || 0,
+        advantages: productData.composition?.advantages?.length || 0
+      },
+      applicationItems: {
+        instructions: productData.application?.instructions?.length || 0,
+        crops: productData.application?.recommendedCrops?.length || 0
+      },
+      safetyItems: {
+        ppe: productData.safety?.ppe?.instructions?.length || 0,
+        hygiene: productData.safety?.hygiene?.instructions?.length || 0
+      },
+      contactInfo: {
+        phones: productData.contact?.phones?.length || 0,
+        hasEmail: !!productData.contact?.email,
+        hasWebsite: !!productData.contact?.website
+      }
+    });
 
     const updatedProduct = await Product.findOneAndUpdate(
       { productId },
       productData,
-      { new: true, runValidators: true }
+      { 
+        new: true, 
+        runValidators: true,
+        upsert: false // Ensure we don't create a new product
+      }
     );
 
-    console.log('Product updated successfully:', updatedProduct._id);
+    if (!updatedProduct) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found during update'
+      });
+    }
+
+    console.log('✅ Product updated successfully:', updatedProduct._id);
+    
     res.json({
       success: true,
       message: 'Product updated successfully',
-      product: updatedProduct
+      product: updatedProduct,
+      stats: {
+        ingredientsCount: updatedProduct.composition?.ingredients?.length || 0,
+        advantagesCount: updatedProduct.composition?.advantages?.length || 0,
+        instructionsCount: updatedProduct.application?.instructions?.length || 0,
+        cropsCount: updatedProduct.application?.recommendedCrops?.length || 0,
+        ppeCount: updatedProduct.safety?.ppe?.instructions?.length || 0,
+        hygieneCount: updatedProduct.safety?.hygiene?.instructions?.length || 0,
+        phonesCount: updatedProduct.contact?.phones?.length || 0
+      }
     });
   } catch (error) {
-    console.error('Update product error:', error);
+    console.error('❌ Update product error:', error);
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Failed to update product',
-      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: process.env.NODE_ENV === 'development' ? {
+        stack: error.stack,
+        name: error.name
+      } : undefined
     });
   }
 });
@@ -1463,7 +1731,7 @@ app.delete('/api/batches/:batchId', authenticateToken, async (req, res) => {
   }
 });
 
-// Enhanced Product View Route (for QR code access)
+// Enhanced Product View Route (for QR code access) with better array handling
 app.get('/api/product-view/:batchId', async (req, res) => {
   try {
     const { batchId } = req.params;
@@ -1493,15 +1761,28 @@ app.get('/api/product-view/:batchId', async (req, res) => {
       }
     }
 
+    // Enhanced product data with better structure
+    const enhancedProduct = {
+      ...product.toJSON(),
+      batchInfo: batch.toJSON(),
+      // Add some helpful counts for the frontend
+      stats: {
+        ingredientsCount: product.composition?.ingredients?.length || 0,
+        advantagesCount: product.composition?.advantages?.length || 0,
+        instructionsCount: product.application?.instructions?.length || 0,
+        cropsCount: product.application?.recommendedCrops?.length || 0,
+        ppeCount: product.safety?.ppe?.instructions?.length || 0,
+        hygieneCount: product.safety?.hygiene?.instructions?.length || 0,
+        phonesCount: product.contact?.phones?.length || 0
+      }
+    };
+
     res.json({
       success: true,
-      data: {
-        ...product.toJSON(),
-        batchInfo: batch.toJSON()
-      }
+      data: enhancedProduct
     });
   } catch (error) {
-    console.error('Get product view error:', error);
+    console.error('❌ Get product view error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Failed to fetch product information',
@@ -1548,6 +1829,61 @@ app.get('/api/analytics/dashboard', authenticateToken, async (req, res) => {
       success: false, 
       message: 'Failed to fetch analytics',
       error: error.message 
+    });
+  }
+});
+
+// Enhanced Debug Route for better troubleshooting
+app.get('/api/debug/product/:productId', authenticateToken, async (req, res) => {
+  try {
+    const { productId } = req.params;
+    
+    const product = await Product.findOne({ productId });
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const batches = await Batch.find({ productId }).sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      debug: {
+        product: {
+          ...product.toJSON(),
+          stats: {
+            ingredientsCount: product.composition?.ingredients?.length || 0,
+            advantagesCount: product.composition?.advantages?.length || 0,
+            instructionsCount: product.application?.instructions?.length || 0,
+            cropsCount: product.application?.recommendedCrops?.length || 0,
+            ppeCount: product.safety?.ppe?.instructions?.length || 0,
+            hygieneCount: product.safety?.hygiene?.instructions?.length || 0,
+            phonesCount: product.contact?.phones?.length || 0
+          }
+        },
+        batches: batches.map(batch => ({
+          batchId: batch.batchId,
+          number: batch.number,
+          isActive: batch.isActive,
+          isExpired: batch.isExpired,
+          createdAt: batch.createdAt
+        })),
+        fileInfo: {
+          hasImage: !!product.imagePath,
+          hasNpsApproval: !!product.npsApproval,
+          hasMsds: !!product.msds,
+          hasCertifications: !!product.certifications?.qualityStandards
+        }
+      }
+    });
+  } catch (error) {
+    console.error('❌ Debug product error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get product debug info',
+      error: error.message
     });
   }
 });
@@ -1705,7 +2041,8 @@ app.use((req, res) => {
       'GET /api/analytics/dashboard',
       'GET /api/storage-info',
       'GET /api/debug/cloudinary',
-      'GET /api/debug/counts'
+      'GET /api/debug/counts',
+      'GET /api/debug/product/:productId'
     ]
   });
 });
@@ -1741,6 +2078,12 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📁 Storage: ${USE_CLOUDINARY ? 'Cloudinary' : 'Local'}`);
+  console.log('🔧 Enhanced Features:');
+  console.log('   ✅ Dynamic Lists Support');
+  console.log('   ✅ Enhanced File Handling');
+  console.log('   ✅ Better Error Handling');
+  console.log('   ✅ Smart Data Validation');
+  console.log('   ✅ Enhanced Logging');
   
   if (USE_CLOUDINARY) {
     console.log('🔗 Cloudinary file storage configured');
@@ -1758,13 +2101,17 @@ app.listen(PORT, async () => {
   console.log(`   GET  /health - Health check`);
   console.log(`   POST /signin - User authentication`);
   console.log(`   GET  /api/products - Get all products`);
+  console.log(`   POST /api/products - Create product (Enhanced)`);
+  console.log(`   PUT  /api/products/:productId - Update product (Enhanced)`);
   console.log(`   GET  /api/product-view/:batchId - Public product view`);
   console.log(`   GET  /api/analytics/dashboard - Analytics`);
   console.log(`   GET  /api/debug/cloudinary - Cloudinary debug`);
+  console.log(`   GET  /api/debug/product/:productId - Product debug (New)`);
   console.log('🚀 ===================================');
   
   await initializeAdmin();
   await updateExistingBatches();
   
   console.log('✅ Server initialization complete!');
+  console.log('🎯 Ready to handle dynamic lists and enhanced functionality!');
 });
