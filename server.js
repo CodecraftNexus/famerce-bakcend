@@ -1887,6 +1887,400 @@ app.use((error, req, res, next) => {
   });
 });
 
+
+const extractDocumentFileName = (filePath) => {
+  if (!filePath) return null;
+  
+  console.log('🔍 Extracting filename from:', filePath);
+  
+  // Take first file if multiple files are comma-separated
+  const cleanPath = filePath.split(',')[0].trim();
+  
+  // If it's a full GCS URL, extract filename
+  if (cleanPath.startsWith('https://storage.googleapis.com/')) {
+    const urlParts = cleanPath.split('/');
+    const filename = urlParts[urlParts.length - 1];
+    console.log('📝 Extracted from GCS URL:', filename);
+    return decodeURIComponent(filename);
+  }
+  
+  // If it's a Cloudinary URL, extract filename
+  if (cleanPath.includes('cloudinary.com')) {
+    const urlParts = cleanPath.split('/');
+    const filename = urlParts[urlParts.length - 1];
+    console.log('📝 Extracted from Cloudinary URL:', filename);
+    return decodeURIComponent(filename);
+  }
+  
+  // If it's a path with slashes, get the last part
+  if (cleanPath.includes('/')) {
+    const segments = cleanPath.split('/');
+    const filename = segments[segments.length - 1];
+    console.log('📝 Extracted from path:', filename);
+    return filename;
+  }
+  
+  console.log('📝 Using as-is:', cleanPath);
+  return cleanPath;
+};
+
+// Helper function to get signed URL for documents stored in cloud
+const getCloudDocumentUrl = async (filePath, expiresIn = 3600) => {
+  if (!filePath) return null;
+  
+  console.log('☁️ Getting cloud URL for:', filePath);
+  
+  // Take first file if multiple files are comma-separated
+  const cleanPath = filePath.split(',')[0].trim();
+  
+  try {
+    if (USE_CLOUDINARY && cleanPath.includes('cloudinary.com')) {
+      // For Cloudinary URLs, return as-is (they're already public or signed)
+      console.log('✅ Returning Cloudinary URL as-is');
+      return cleanPath;
+    }
+    
+    if (cleanPath.startsWith('https://storage.googleapis.com/')) {
+      // For Google Cloud Storage, generate signed URL
+      console.log('🔐 Generating signed URL for GCS file');
+      
+      // Extract bucket and file path from URL
+      const urlParts = cleanPath.replace('https://storage.googleapis.com/', '').split('/');
+      const bucketName = urlParts[0];
+      const fileName = urlParts.slice(1).join('/');
+      
+      // If you have GCS configured, generate signed URL here
+      // For now, return the direct URL
+      console.log('⚠️ GCS signed URL generation not implemented, returning direct URL');
+      return cleanPath;
+    }
+    
+    // For other URLs, return as-is
+    return cleanPath;
+    
+  } catch (error) {
+    console.error('❌ Error getting cloud document URL:', error);
+    return cleanPath; // Fallback to original URL
+  }
+};
+
+// Route to get signed URL for documents (POST method to handle full paths)
+app.post('/api/documents/get-signed-url', authenticateToken, async (req, res) => {
+  try {
+    const { filePath, type = 'documents' } = req.body;
+    
+    console.log('📄 Getting signed URL for:', filePath);
+    
+    if (!filePath) {
+      return res.status(400).json({
+        success: false,
+        message: 'File path is required'
+      });
+    }
+    
+    // Clean the file path
+    const cleanPath = filePath.split(',')[0].trim();
+    
+    if (!cleanPath || 
+        cleanPath.toLowerCase().includes('no document') ||
+        cleanPath === 'No documents uploaded' ||
+        cleanPath === 'No document uploaded') {
+      return res.status(404).json({
+        success: false,
+        message: 'No document available'
+      });
+    }
+    
+    // Get the signed URL
+    const signedUrl = await getCloudDocumentUrl(cleanPath);
+    
+    if (!signedUrl) {
+      return res.status(404).json({
+        success: false,
+        message: 'Document not found or not accessible'
+      });
+    }
+    
+    console.log('✅ Generated signed URL successfully');
+    
+    res.json({
+      success: true,
+      signedUrl: signedUrl,
+      actualPath: cleanPath,
+      filename: extractDocumentFileName(cleanPath),
+      expiresIn: 3600 // 1 hour
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting signed URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get document URL: ' + error.message
+    });
+  }
+});
+
+// Route to get signed URL for documents (GET method for simple filenames)
+app.get('/api/documents/signed-url/:type/:filename', authenticateToken, async (req, res) => {
+  try {
+    const { type, filename } = req.params;
+    
+    console.log('📄 Getting signed URL for filename:', filename);
+    
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        message: 'Filename is required'
+      });
+    }
+    
+    const decodedFilename = decodeURIComponent(filename);
+    
+    // For local storage
+    if (!USE_CLOUDINARY) {
+      const localPath = `/uploads/${type}/${decodedFilename}`;
+      const fullPath = path.join(__dirname, 'uploads', type, decodedFilename);
+      
+      if (fs.existsSync(fullPath)) {
+        const signedUrl = `${req.protocol}://${req.get('host')}${localPath}`;
+        return res.json({
+          success: true,
+          signedUrl: signedUrl,
+          actualPath: localPath,
+          filename: decodedFilename
+        });
+      } else {
+        return res.status(404).json({
+          success: false,
+          message: 'Document not found'
+        });
+      }
+    }
+    
+    // For cloud storage, construct the likely URL
+    let cloudUrl = null;
+    
+    if (decodedFilename.startsWith('http')) {
+      cloudUrl = decodedFilename;
+    } else {
+      // Construct Cloudinary URL if using Cloudinary
+      if (process.env.CLOUDINARY_CLOUD_NAME) {
+        cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${type}/${decodedFilename}`;
+      }
+    }
+    
+    if (cloudUrl) {
+      res.json({
+        success: true,
+        signedUrl: cloudUrl,
+        actualPath: cloudUrl,
+        filename: decodedFilename
+      });
+    } else {
+      res.status(404).json({
+        success: false,
+        message: 'Document not found'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error getting signed URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get document URL: ' + error.message
+    });
+  }
+});
+
+// Route to directly download documents
+app.get('/api/documents/download/:type/:filename', async (req, res) => {
+  try {
+    const { type, filename } = req.params;
+    
+    console.log('⬇️ Direct download request for:', filename);
+    
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        message: 'Filename is required'
+      });
+    }
+    
+    const decodedFilename = decodeURIComponent(filename);
+    
+    // For local storage
+    if (!USE_CLOUDINARY) {
+      const filePath = path.join(__dirname, 'uploads', type, decodedFilename);
+      
+      if (fs.existsSync(filePath)) {
+        const stat = fs.statSync(filePath);
+        const fileExtension = path.extname(decodedFilename).toLowerCase();
+        
+        // Set appropriate content type
+        let contentType = 'application/octet-stream';
+        if (fileExtension === '.pdf') contentType = 'application/pdf';
+        else if (fileExtension === '.doc') contentType = 'application/msword';
+        else if (fileExtension === '.docx') contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        else if (fileExtension === '.txt') contentType = 'text/plain';
+        
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Length', stat.size);
+        res.setHeader('Content-Disposition', `attachment; filename="${decodedFilename}"`);
+        res.setHeader('Cache-Control', 'no-cache');
+        
+        const fileStream = fs.createReadStream(filePath);
+        fileStream.pipe(res);
+        
+        console.log('✅ Local file download started');
+        return;
+      }
+    }
+    
+    // For cloud storage, redirect to the cloud URL
+    let cloudUrl = null;
+    
+    if (decodedFilename.startsWith('http')) {
+      cloudUrl = decodedFilename;
+    } else if (process.env.CLOUDINARY_CLOUD_NAME) {
+      cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${type}/${decodedFilename}`;
+    }
+    
+    if (cloudUrl) {
+      console.log('🔄 Redirecting to cloud URL:', cloudUrl);
+      res.redirect(cloudUrl);
+    } else {
+      res.status(404).json({
+        success: false,
+        message: 'Document not found'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Download error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Download failed: ' + error.message
+    });
+  }
+});
+
+// Route to serve images with proxy support
+app.get('/api/files/image/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    
+    console.log('🖼️ Image request for:', filename);
+    
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        message: 'Filename is required'
+      });
+    }
+    
+    const decodedFilename = decodeURIComponent(filename);
+    
+    // For local storage
+    if (!USE_CLOUDINARY) {
+      const imagePath = path.join(__dirname, 'uploads', 'products', decodedFilename);
+      
+      if (fs.existsSync(imagePath)) {
+        const stat = fs.statSync(imagePath);
+        const fileExtension = path.extname(decodedFilename).toLowerCase();
+        
+        // Set appropriate content type for images
+        let contentType = 'image/jpeg';
+        if (fileExtension === '.png') contentType = 'image/png';
+        else if (fileExtension === '.gif') contentType = 'image/gif';
+        else if (fileExtension === '.webp') contentType = 'image/webp';
+        else if (fileExtension === '.svg') contentType = 'image/svg+xml';
+        
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Length', stat.size);
+        res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
+        
+        const fileStream = fs.createReadStream(imagePath);
+        fileStream.pipe(res);
+        
+        console.log('✅ Local image served');
+        return;
+      }
+    }
+    
+    // For cloud storage, redirect to the cloud URL
+    let cloudUrl = null;
+    
+    if (decodedFilename.startsWith('http')) {
+      cloudUrl = decodedFilename;
+    } else if (process.env.CLOUDINARY_CLOUD_NAME) {
+      cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/products/${decodedFilename}`;
+    }
+    
+    if (cloudUrl) {
+      console.log('🔄 Redirecting to cloud image URL:', cloudUrl);
+      res.redirect(cloudUrl);
+    } else {
+      // Return a placeholder image or 404
+      res.status(404).json({
+        success: false,
+        message: 'Image not found'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Image serving error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to serve image: ' + error.message
+    });
+  }
+});
+
+// Debug route to test document access
+app.get('/api/debug/document-access/:type/:filename', authenticateToken, async (req, res) => {
+  try {
+    const { type, filename } = req.params;
+    const decodedFilename = decodeURIComponent(filename);
+    
+    console.log('🧪 Debug document access for:', decodedFilename);
+    
+    const debugInfo = {
+      filename: decodedFilename,
+      type: type,
+      storageType: USE_CLOUDINARY ? 'cloudinary' : 'local',
+      cloudinaryConfigured: !!process.env.CLOUDINARY_CLOUD_NAME
+    };
+    
+    if (!USE_CLOUDINARY) {
+      // Check local file
+      const localPath = path.join(__dirname, 'uploads', type, decodedFilename);
+      debugInfo.localPath = localPath;
+      debugInfo.localExists = fs.existsSync(localPath);
+      
+      if (debugInfo.localExists) {
+        const stat = fs.statSync(localPath);
+        debugInfo.fileSize = stat.size;
+        debugInfo.lastModified = stat.mtime;
+      }
+    } else {
+      // For cloud storage
+      debugInfo.cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${type}/${decodedFilename}`;
+    }
+    
+    res.json({
+      success: true,
+      debug: debugInfo
+    });
+    
+  } catch (error) {
+    console.error('🧪 Debug error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Debug failed: ' + error.message
+    });
+  }
+});
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ 
