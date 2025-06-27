@@ -105,6 +105,7 @@ if (USE_CLOUDINARY) {
   console.log('💾 Local file storage configured');
 }
 
+
 // ENHANCED Multer Configuration with Better Error Handling
 const createMulterUpload = () => {
   if (USE_CLOUDINARY) {
@@ -222,8 +223,6 @@ const uploadFields = upload.fields([
   { name: 'msdsFiles[]', maxCount: 10 },
   { name: 'certificationsFiles[]', maxCount: 10 }
 ]);
-
-
 
 // Enhanced Schemas
 const userSchema = new mongoose.Schema({
@@ -352,7 +351,6 @@ productSchema.pre('save', function(next) {
 });
 
 const Product = mongoose.model('Product', productSchema);
-
 
 const batchSchema = new mongoose.Schema({
   batchId: {
@@ -620,90 +618,241 @@ const validateProductData = (productData) => {
 };
 
 // FIXED File Upload Handler for Cloudinary
-
 const handleFileUpload = async (file, type = 'document') => {
   if (!USE_CLOUDINARY) {
     throw new Error('Cloudinary upload called but not configured');
   }
 
-  console.log(`📤 Starting upload for: ${file.originalname}`);
-  console.log(`📋 File details:`, {
-    name: file.originalname,
-    size: file.size,
-    type: file.mimetype,
-    buffer: file.buffer ? 'Buffer exists' : 'No buffer',
-    bufferLength: file.buffer ? file.buffer.length : 0
-  });
-
-  // Validate file buffer
-  if (!file.buffer || file.buffer.length === 0) {
-    throw new Error(`No file data received for ${file.originalname}`);
-  }
+  console.log(`📤 Starting ${type} upload for file:`, file.originalname);
 
   return new Promise((resolve, reject) => {
+    // FIXED: Use proper folder structure without hardcoded cloud name
     const uploadOptions = {
-      folder: type === 'image' ? 'products' : 'documents',
+      folder: type === 'image' ? 'products' : 'documents', // Removed hardcoded cloud name
+      resource_type: type === 'image' ? 'image' : 'raw',
       use_filename: true,
       unique_filename: true,
-      timeout: 120000, // 2 minutes
-      chunk_size: 6000000, // 6MB chunks for large files
+      timeout: 60000, // 60 second timeout
     };
 
-    // Set resource type based on file type
     if (type === 'image') {
-      uploadOptions.resource_type = 'image';
       uploadOptions.transformation = [
         { width: 1200, height: 900, crop: 'limit', quality: 'auto:good' }
       ];
-    } else {
-      uploadOptions.resource_type = 'raw';
-      // Don't set format for raw uploads
     }
 
-    console.log(`🔧 Upload options:`, uploadOptions);
+    console.log('Upload options:', uploadOptions);
 
-    try {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        uploadOptions,
-        (error, result) => {
-          if (error) {
-            console.error(`❌ Cloudinary error for ${file.originalname}:`, {
-              message: error.message,
-              http_code: error.http_code,
-              name: error.name,
-              error: error
-            });
-            reject(new Error(`Upload failed for ${file.originalname}: ${error.message}`));
-          } else {
-            console.log(`✅ Upload successful for ${file.originalname}:`, {
-              url: result.secure_url,
-              public_id: result.public_id,
-              resource_type: result.resource_type,
-              bytes: result.bytes
-            });
-            resolve(result.secure_url);
-          }
+    const uploadStream = cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          console.error('❌ Cloudinary upload error:', error);
+          reject(new Error(`Cloudinary upload failed: ${error.message}`));
+        } else {
+          console.log('✅ Cloudinary upload success:', result.secure_url);
+          resolve(result.secure_url);
         }
-      );
+      }
+    );
 
-      // Handle stream errors
-      uploadStream.on('error', (streamError) => {
-        console.error(`❌ Stream error for ${file.originalname}:`, streamError);
-        reject(new Error(`Stream error: ${streamError.message}`));
-      });
+    // Handle stream errors
+    uploadStream.on('error', (error) => {
+      console.error('❌ Upload stream error:', error);
+      reject(new Error(`Upload stream failed: ${error.message}`));
+    });
 
-      // Write buffer to stream
-      uploadStream.end(file.buffer);
-      
-    } catch (syncError) {
-      console.error(`❌ Sync error for ${file.originalname}:`, syncError);
-      reject(new Error(`Sync error: ${syncError.message}`));
-    }
+    uploadStream.end(file.buffer);
   });
 };
 
-// ENHANCED Product Creation with Better File Handling
+// Enhanced admin initialization
+const initializeAdmin = async () => {
+  try {
+    const adminExists = await User.findOne({ username: 'admin' });
+    if (!adminExists) {
+      const admin = new User({
+        username: 'admin',
+        password: 'admin123',
+        role: 'admin'
+      });
+      await admin.save();
+      console.log('✅ Default admin user created: username=admin, password=admin123');
+    } else {
+      console.log('✅ Admin user already exists');
+    }
+  } catch (error) {
+    console.error('❌ Error creating admin user:', error);
+  }
+};
 
+// Enhanced migration function
+const updateExistingBatches = async () => {
+  try {
+    const batches = await Batch.find({ 
+      $or: [
+        { batchId: { $exists: false } },
+        { batchId: null },
+        { batchId: '' }
+      ]
+    });
+    
+    if (batches.length > 0) {
+      console.log(`🔄 Found ${batches.length} batches without batchId. Updating...`);
+      
+      for (let batch of batches) {
+        try {
+          if (!batch.batchId) {
+            batch.batchId = await generateShortBatchId();
+          }
+          
+          await batch.save();
+          console.log(`✅ Updated batch ${batch.number} with batchId: ${batch.batchId}`);
+        } catch (batchError) {
+          console.error(`❌ Error updating batch ${batch.number}:`, batchError.message);
+          continue;
+        }
+      }
+      
+      console.log(`✅ Successfully updated ${batches.length} existing batches`);
+    } else {
+      console.log('✅ All batches have valid batchId');
+    }
+  } catch (error) {
+    console.error('❌ Error in updateExistingBatches:', error);
+  }
+};
+
+// ENHANCED ERROR HANDLING - Add this before other routes
+app.use((error, req, res, next) => {
+  console.error('🚨 Error caught by middleware:', {
+    name: error.name,
+    message: error.message,
+    code: error.code,
+    field: error.field,
+    url: req.url,
+    method: req.method
+  });
+
+  // Handle multer errors specifically
+  if (error instanceof multer.MulterError) {
+    console.error('📁 Multer error details:', error);
+    
+    switch (error.code) {
+      case 'LIMIT_FILE_SIZE':
+        return res.status(400).json({ 
+          success: false, 
+          message: 'File too large. Maximum size is 50MB per file.',
+          errorCode: 'FILE_TOO_LARGE'
+        });
+      
+      case 'LIMIT_FILE_COUNT':
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Too many files uploaded. Maximum 10 files per field.',
+          errorCode: 'TOO_MANY_FILES'
+        });
+      
+      case 'LIMIT_UNEXPECTED_FILE':
+        console.error('🚨 Unexpected field error:', {
+          field: error.field,
+          expectedFields: ['image', 'npsApprovalFiles', 'msdsFiles', 'certificationsFiles']
+        });
+        return res.status(400).json({ 
+          success: false, 
+          message: `Unexpected file field: ${error.field}. Please make sure you're using the correct file input names.`,
+          errorCode: 'UNEXPECTED_FIELD',
+          details: {
+            field: error.field,
+            expectedFields: ['image', 'npsApprovalFiles', 'msdsFiles', 'certificationsFiles']
+          }
+        });
+      
+      case 'LIMIT_PART_COUNT':
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Too many form parts. Please reduce the number of form fields.',
+          errorCode: 'TOO_MANY_PARTS'
+        });
+      
+      case 'LIMIT_FIELD_KEY':
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Field name too long.',
+          errorCode: 'FIELD_NAME_TOO_LONG'
+        });
+      
+      case 'LIMIT_FIELD_VALUE':
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Field value too long.',
+          errorCode: 'FIELD_VALUE_TOO_LONG'
+        });
+      
+      case 'LIMIT_FIELD_COUNT':
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Too many fields in form.',
+          errorCode: 'TOO_MANY_FIELDS'
+        });
+      
+      default:
+        return res.status(400).json({ 
+          success: false, 
+          message: `File upload error: ${error.message}`,
+          errorCode: 'UPLOAD_ERROR'
+        });
+    }
+  }
+
+  // Handle file filter errors
+  if (error.message && error.message.includes('Invalid') && error.message.includes('file type')) {
+    return res.status(400).json({
+      success: false,
+      message: error.message,
+      errorCode: 'INVALID_FILE_TYPE'
+    });
+  }
+
+  // Handle JSON parsing errors
+  if (error instanceof SyntaxError && error.message.includes('JSON')) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid JSON data in request',
+      errorCode: 'INVALID_JSON'
+    });
+  }
+
+  // Pass to next error handler
+  next(error);
+});
+
+// Health check with detailed info
+app.get('/health', async (req, res) => {
+  try {
+    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    const productCount = await Product.countDocuments();
+    const batchCount = await Batch.countDocuments();
+    
+    res.json({ 
+      status: 'OK', 
+      timestamp: new Date().toISOString(),
+      database: {
+        status: dbStatus,
+        products: productCount,
+        batches: batchCount
+      },
+      storage: USE_CLOUDINARY ? 'cloudinary' : 'local',
+      cloudinary: USE_CLOUDINARY ? (process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured') : 'disabled',
+      environment: process.env.NODE_ENV || 'development'
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      message: error.message
+    });
+  }
+});
 
 // Debug route to test file uploads
 app.post('/api/debug/upload', authenticateToken, uploadFields, (req, res) => {
@@ -859,7 +1008,6 @@ app.get('/auth/check', authenticateToken, async (req, res) => {
   }
 });
 
-
 // Enhanced Product Routes
 app.get('/api/products', authenticateToken, async (req, res) => {
   try {
@@ -943,26 +1091,13 @@ app.get('/api/products', authenticateToken, async (req, res) => {
 app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
   try {
     console.log('🆕 Creating new product...');
-    console.log('📁 Received files structure:', req.files);
-    console.log('📝 Body keys:', Object.keys(req.body));
-    
-    // Log detailed file information
-    if (req.files) {
-      Object.keys(req.files).forEach(fieldName => {
-        console.log(`📄 Field "${fieldName}":`, req.files[fieldName].map(f => ({
-          name: f.originalname,
-          size: f.size,
-          type: f.mimetype,
-          hasBuffer: !!f.buffer,
-          bufferSize: f.buffer ? f.buffer.length : 0
-        })));
-      });
-    }
+    console.log('📁 Received files:', req.files);
+    console.log('📝 Received body keys:', Object.keys(req.body));
     
     let productData;
     try {
       productData = JSON.parse(req.body.productData);
-      console.log('✅ Product data parsed successfully');
+      console.log('✅ Parsed product data successfully');
     } catch (parseError) {
       console.error('❌ JSON parse error:', parseError);
       return res.status(400).json({ 
@@ -989,101 +1124,97 @@ app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
       });
     }
 
-    // Process product data
+    // Process and validate product data
     productData = processProductData(productData);
+    const validationErrors = validateProductData(productData);
+    
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationErrors
+      });
+    }
 
-    // Handle file uploads with detailed logging
+    // Handle file uploads
     if (USE_CLOUDINARY) {
       console.log('🔗 Using Cloudinary for file uploads');
       
       // Upload image
       if (req.files && req.files.image && req.files.image[0]) {
-        console.log('📸 Starting image upload...');
         try {
-          const imageFile = req.files.image[0];
-          console.log(`🖼️ Image file: ${imageFile.originalname} (${imageFile.size} bytes)`);
-          
-          const imageUrl = await handleFileUpload(imageFile, 'image');
+          console.log('📸 Uploading image to Cloudinary...');
+          const imageUrl = await handleFileUpload(req.files.image[0], 'image');
           productData.imagePath = imageUrl;
-          console.log('✅ Image upload completed:', imageUrl);
+          console.log('✅ Image uploaded successfully:', imageUrl);
         } catch (error) {
-          console.error('❌ Image upload failed:', error);
+          console.error('❌ Image upload error:', error);
           return res.status(500).json({
             success: false,
-            message: 'Image upload failed: ' + error.message
+            message: 'Failed to upload image: ' + error.message
           });
         }
       }
 
       // Upload NPS approval files
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        console.log(`📄 Starting NPS files upload (${req.files.npsApprovalFiles.length} files)...`);
         try {
+          console.log('📄 Uploading NPS approval files...');
           const npsUrls = [];
-          for (let i = 0; i < req.files.npsApprovalFiles.length; i++) {
-            const file = req.files.npsApprovalFiles[i];
-            console.log(`📄 Uploading NPS file ${i + 1}/${req.files.npsApprovalFiles.length}: ${file.originalname}`);
-            
-            const url = await handleFileUpload(file, 'document');
+          for (const file of req.files.npsApprovalFiles) {
+            const url = await handleFileUpload(file, 'documents');
             npsUrls.push(url);
-            console.log(`✅ NPS file ${i + 1} uploaded:`, url);
           }
           productData.npsApproval = npsUrls.join(', ');
-          console.log('✅ All NPS files uploaded successfully');
+          console.log('✅ NPS files uploaded successfully:', npsUrls);
         } catch (error) {
-          console.error('❌ NPS files upload failed:', error);
+          console.error('❌ NPS files upload error:', error);
           return res.status(500).json({
             success: false,
-            message: 'NPS files upload failed: ' + error.message
+            message: 'Failed to upload NPS approval files: ' + error.message
           });
         }
       }
 
       // Upload MSDS files
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        console.log(`📄 Starting MSDS files upload (${req.files.msdsFiles.length} files)...`);
         try {
+          console.log('📄 Uploading MSDS files...');
           const msdsUrls = [];
-          for (let i = 0; i < req.files.msdsFiles.length; i++) {
-            const file = req.files.msdsFiles[i];
-            console.log(`📄 Uploading MSDS file ${i + 1}/${req.files.msdsFiles.length}: ${file.originalname}`);
-            
-            const url = await handleFileUpload(file, 'document');
+          for (const file of req.files.msdsFiles) {
+            const url = await handleFileUpload(file, 'documents');
             msdsUrls.push(url);
-            console.log(`✅ MSDS file ${i + 1} uploaded:`, url);
           }
           productData.msds = msdsUrls.join(', ');
-          console.log('✅ All MSDS files uploaded successfully');
+          console.log('✅ MSDS files uploaded successfully:', msdsUrls);
         } catch (error) {
-          console.error('❌ MSDS files upload failed:', error);
+          console.error('❌ MSDS files upload error:', error);
           return res.status(500).json({
             success: false,
-            message: 'MSDS files upload failed: ' + error.message
+            message: 'Failed to upload MSDS files: ' + error.message
           });
         }
       }
 
       // Upload certification files
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        console.log(`📄 Starting certification files upload (${req.files.certificationsFiles.length} files)...`);
         try {
+          console.log('📄 Uploading certification files...');
           const certUrls = [];
-          for (let i = 0; i < req.files.certificationsFiles.length; i++) {
-            const file = req.files.certificationsFiles[i];
-            console.log(`📄 Uploading certification file ${i + 1}/${req.files.certificationsFiles.length}: ${file.originalname}`);
-            
-            const url = await handleFileUpload(file, 'document');
+          for (const file of req.files.certificationsFiles) {
+            const url = await handleFileUpload(file, 'documents');
             certUrls.push(url);
-            console.log(`✅ Certification file ${i + 1} uploaded:`, url);
           }
-          productData.certifications = productData.certifications || {};
-          productData.certifications.qualityStandards = certUrls.join(', ');
-          console.log('✅ All certification files uploaded successfully');
+          if (certUrls.length > 0) {
+            productData.certifications = productData.certifications || {};
+            productData.certifications.qualityStandards = certUrls.join(', ');
+          }
+          console.log('✅ Certification files uploaded successfully:', certUrls);
         } catch (error) {
-          console.error('❌ Certification files upload failed:', error);
+          console.error('❌ Certification files upload error:', error);
           return res.status(500).json({
             success: false,
-            message: 'Certification files upload failed: ' + error.message
+            message: 'Failed to upload certification files: ' + error.message
           });
         }
       }
@@ -1100,14 +1231,14 @@ app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
         productData.npsApproval = req.files.npsApprovalFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('✅ NPS files saved locally');
+        console.log('✅ NPS files saved locally:', productData.npsApproval);
       }
 
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
         productData.msds = req.files.msdsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('✅ MSDS files saved locally');
+        console.log('✅ MSDS files saved locally:', productData.msds);
       }
 
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
@@ -1115,34 +1246,28 @@ app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
         productData.certifications.qualityStandards = req.files.certificationsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('✅ Certification files saved locally');
+        console.log('✅ Certification files saved locally:', productData.certifications.qualityStandards);
       }
     }
 
-    console.log('💾 Creating product in database...');
-    console.log('📊 Final product data summary:', {
-      name: productData.name,
-      hasImage: !!productData.imagePath,
-      hasNpsApproval: !!productData.npsApproval,
-      hasMsds: !!productData.msds,
-      hasCertifications: !!productData.certifications?.qualityStandards
-    });
-
     // Create the product
+    console.log('💾 Creating product in database...');
     const product = new Product(productData);
     await product.save();
 
-    console.log('✅ Product created successfully with ID:', product._id);
-    
+    console.log('✅ Product created successfully:', product._id);
     res.json({
       success: true,
       message: 'Product created successfully',
       product,
-      uploadSummary: {
-        imageUploaded: !!productData.imagePath,
-        npsFilesUploaded: !!productData.npsApproval,
-        msdsFilesUploaded: !!productData.msds,
-        certificationFilesUploaded: !!productData.certifications?.qualityStandards
+      stats: {
+        ingredientsCount: product.composition?.ingredients?.length || 0,
+        advantagesCount: product.composition?.advantages?.length || 0,
+        instructionsCount: product.application?.instructions?.length || 0,
+        cropsCount: product.application?.recommendedCrops?.length || 0,
+        ppeCount: product.safety?.ppe?.instructions?.length || 0,
+        hygieneCount: product.safety?.hygiene?.instructions?.length || 0,
+        phonesCount: product.contact?.phones?.length || 0
       }
     });
   } catch (error) {
@@ -1150,65 +1275,27 @@ app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Failed to create product',
-      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: process.env.NODE_ENV === 'development' ? {
+        stack: error.stack,
+        name: error.name
+      } : undefined
     });
   }
 });
-// Health check with detailed info
-app.get('/health', async (req, res) => {
-  try {
-    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-    const productCount = await Product.countDocuments();
-    const batchCount = await Batch.countDocuments();
-    
-    res.json({ 
-      status: 'OK', 
-      timestamp: new Date().toISOString(),
-      database: {
-        status: dbStatus,
-        products: productCount,
-        batches: batchCount
-      },
-      storage: USE_CLOUDINARY ? 'cloudinary' : 'local',
-      cloudinary: USE_CLOUDINARY ? (process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured') : 'disabled',
-      environment: process.env.NODE_ENV || 'development'
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'ERROR',
-      message: error.message
-    });
-  }
-});
-
 
 // ENHANCED Update Product Route with Dynamic Lists Support
-// ENHANCED Product Update Route with Better File Handling
 app.put('/api/products/:productId', authenticateToken, uploadFields, async (req, res) => {
   try {
     const { productId } = req.params;
     
-    console.log('🔄 Updating product:', productId);
-    console.log('📁 Received files structure:', req.files);
-    console.log('📝 Body keys:', Object.keys(req.body));
-    
-    // Log detailed file information
-    if (req.files) {
-      Object.keys(req.files).forEach(fieldName => {
-        console.log(`📄 Field "${fieldName}":`, req.files[fieldName].map(f => ({
-          name: f.originalname,
-          size: f.size,
-          type: f.mimetype,
-          hasBuffer: !!f.buffer,
-          bufferSize: f.buffer ? f.buffer.length : 0
-        })));
-      });
-    }
-    
+    console.log('🔄 Update request for product:', productId);
+    console.log('📁 Received files:', req.files);
+    console.log('📝 Received body keys:', Object.keys(req.body));
+
     let productData;
     try {
       productData = JSON.parse(req.body.productData);
-      console.log('✅ Product data parsed successfully');
+      console.log('✅ Parsed product data successfully');
     } catch (parseError) {
       console.error('❌ JSON parse error:', parseError);
       return res.status(400).json({ 
@@ -1230,128 +1317,122 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
 
     console.log('✅ Found existing product:', existingProduct.name);
 
-    // Process product data
+    // Process and validate product data
     productData = processProductData(productData);
+    const validationErrors = validateProductData(productData);
+    
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationErrors
+      });
+    }
 
     // Preserve existing file paths if no new files uploaded
-    const preserveExisting = {
+    const preserveExistingFiles = {
       imagePath: existingProduct.imagePath,
       npsApproval: existingProduct.npsApproval,
       msds: existingProduct.msds,
       qualityStandards: existingProduct.certifications?.qualityStandards
     };
 
-    console.log('📂 Existing files to preserve:', preserveExisting);
-
-    // Handle file uploads with detailed logging
+    // Handle file uploads with enhanced error handling
     if (USE_CLOUDINARY) {
       console.log('🔗 Using Cloudinary for file updates');
       
       // Update image if provided
       if (req.files && req.files.image && req.files.image[0]) {
-        console.log('📸 Updating product image...');
         try {
-          const imageFile = req.files.image[0];
-          console.log(`🖼️ New image file: ${imageFile.originalname} (${imageFile.size} bytes)`);
-          
-          const imageUrl = await handleFileUpload(imageFile, 'image');
+          console.log('📸 Updating product image...');
+          const imageUrl = await handleFileUpload(req.files.image[0], 'image');
           productData.imagePath = imageUrl;
-          console.log('✅ Image update completed:', imageUrl);
+          console.log('✅ Image updated:', imageUrl);
         } catch (error) {
-          console.error('❌ Image update failed:', error);
+          console.error('❌ Image update error:', error);
           return res.status(500).json({
             success: false,
-            message: 'Image update failed: ' + error.message
+            message: 'Failed to update image: ' + error.message
           });
         }
       } else {
-        productData.imagePath = preserveExisting.imagePath;
-        console.log('📸 Keeping existing image:', preserveExisting.imagePath ? 'Yes' : 'None');
+        // Keep existing image
+        productData.imagePath = preserveExistingFiles.imagePath;
       }
 
       // Handle NPS approval files
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        console.log(`📄 Updating NPS files (${req.files.npsApprovalFiles.length} files)...`);
         try {
+          console.log('📄 Updating NPS approval files...');
           const npsUrls = [];
-          for (let i = 0; i < req.files.npsApprovalFiles.length; i++) {
-            const file = req.files.npsApprovalFiles[i];
-            console.log(`📄 Uploading NPS file ${i + 1}/${req.files.npsApprovalFiles.length}: ${file.originalname}`);
-            
-            const url = await handleFileUpload(file, 'document');
+          for (const file of req.files.npsApprovalFiles) {
+            const url = await handleFileUpload(file, 'documents');
             npsUrls.push(url);
-            console.log(`✅ NPS file ${i + 1} uploaded:`, url);
           }
           productData.npsApproval = npsUrls.join(', ');
-          console.log('✅ All NPS files updated successfully');
+          console.log('✅ NPS files updated:', npsUrls.length, 'files');
         } catch (error) {
-          console.error('❌ NPS files update failed:', error);
+          console.error('❌ NPS files update error:', error);
           return res.status(500).json({
             success: false,
-            message: 'NPS files update failed: ' + error.message
+            message: 'Failed to update NPS approval files: ' + error.message
           });
         }
       } else {
-        productData.npsApproval = preserveExisting.npsApproval;
-        console.log('📄 Keeping existing NPS files:', preserveExisting.npsApproval ? 'Yes' : 'None');
+        // Keep existing NPS files
+        productData.npsApproval = preserveExistingFiles.npsApproval;
       }
 
       // Handle MSDS files
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        console.log(`📄 Updating MSDS files (${req.files.msdsFiles.length} files)...`);
         try {
+          console.log('📄 Updating MSDS files...');
           const msdsUrls = [];
-          for (let i = 0; i < req.files.msdsFiles.length; i++) {
-            const file = req.files.msdsFiles[i];
-            console.log(`📄 Uploading MSDS file ${i + 1}/${req.files.msdsFiles.length}: ${file.originalname}`);
-            
-            const url = await handleFileUpload(file, 'document');
+          for (const file of req.files.msdsFiles) {
+            const url = await handleFileUpload(file, 'documents');
             msdsUrls.push(url);
-            console.log(`✅ MSDS file ${i + 1} uploaded:`, url);
           }
           productData.msds = msdsUrls.join(', ');
-          console.log('✅ All MSDS files updated successfully');
+          console.log('✅ MSDS files updated:', msdsUrls.length, 'files');
         } catch (error) {
-          console.error('❌ MSDS files update failed:', error);
+          console.error('❌ MSDS files update error:', error);
           return res.status(500).json({
             success: false,
-            message: 'MSDS files update failed: ' + error.message
+            message: 'Failed to update MSDS files: ' + error.message
           });
         }
       } else {
-        productData.msds = preserveExisting.msds;
-        console.log('📄 Keeping existing MSDS files:', preserveExisting.msds ? 'Yes' : 'None');
+        // Keep existing MSDS files
+        productData.msds = preserveExistingFiles.msds;
       }
 
       // Handle certification files
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        console.log(`📄 Updating certification files (${req.files.certificationsFiles.length} files)...`);
         try {
+          console.log('📄 Updating certification files...');
           const certUrls = [];
-          for (let i = 0; i < req.files.certificationsFiles.length; i++) {
-            const file = req.files.certificationsFiles[i];
-            console.log(`📄 Uploading certification file ${i + 1}/${req.files.certificationsFiles.length}: ${file.originalname}`);
-            
-            const url = await handleFileUpload(file, 'document');
+          for (const file of req.files.certificationsFiles) {
+            const url = await handleFileUpload(file, 'documents');
             certUrls.push(url);
-            console.log(`✅ Certification file ${i + 1} uploaded:`, url);
           }
-          productData.certifications = productData.certifications || {};
-          productData.certifications.qualityStandards = certUrls.join(', ');
-          console.log('✅ All certification files updated successfully');
+          if (certUrls.length > 0) {
+            productData.certifications = productData.certifications || {};
+            productData.certifications.qualityStandards = certUrls.join(', ');
+          }
+          console.log('✅ Certification files updated:', certUrls.length, 'files');
         } catch (error) {
-          console.error('❌ Certification files update failed:', error);
+          console.error('❌ Certification files update error:', error);
           return res.status(500).json({
             success: false,
-            message: 'Certification files update failed: ' + error.message
+            message: 'Failed to update certification files: ' + error.message
           });
         }
       } else {
+        // Keep existing certification files
         if (!productData.certifications) {
           productData.certifications = {};
         }
-        productData.certifications.qualityStandards = preserveExisting.qualityStandards;
-        console.log('📄 Keeping existing certification files:', preserveExisting.qualityStandards ? 'Yes' : 'None');
+        productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
       }
     } else {
       // Local file handling for updates
@@ -1361,7 +1442,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
         productData.imagePath = `/uploads/products/${req.files.image[0].filename}`;
         console.log('✅ Image saved locally:', productData.imagePath);
       } else {
-        productData.imagePath = preserveExisting.imagePath;
+        productData.imagePath = preserveExistingFiles.imagePath;
       }
 
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
@@ -1370,7 +1451,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
           .join(', ');
         console.log('✅ NPS files saved locally');
       } else {
-        productData.npsApproval = preserveExisting.npsApproval;
+        productData.npsApproval = preserveExistingFiles.npsApproval;
       }
 
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
@@ -1379,7 +1460,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
           .join(', ');
         console.log('✅ MSDS files saved locally');
       } else {
-        productData.msds = preserveExisting.msds;
+        productData.msds = preserveExistingFiles.msds;
       }
 
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
@@ -1392,24 +1473,20 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
         if (!productData.certifications) {
           productData.certifications = {};
         }
-        productData.certifications.qualityStandards = preserveExisting.qualityStandards;
+        productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
       }
     }
 
-    console.log('💾 Updating product in database...');
-    console.log('📊 Final update data summary:', {
-      name: productData.name,
-      hasImage: !!productData.imagePath,
-      hasNpsApproval: !!productData.npsApproval,
-      hasMsds: !!productData.msds,
-      hasCertifications: !!productData.certifications?.qualityStandards
-    });
-
     // Update the product
+    console.log('💾 Updating product in database...');
     const updatedProduct = await Product.findOneAndUpdate(
       { productId },
       productData,
-      { new: true, runValidators: true }
+      { 
+        new: true, 
+        runValidators: true,
+        upsert: false // Ensure we don't create a new product
+      }
     );
 
     if (!updatedProduct) {
@@ -1425,12 +1502,14 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       success: true,
       message: 'Product updated successfully',
       product: updatedProduct,
-      updateSummary: {
-        imageUpdated: !!productData.imagePath && productData.imagePath !== preserveExisting.imagePath,
-        npsFilesUpdated: !!productData.npsApproval && productData.npsApproval !== preserveExisting.npsApproval,
-        msdsFilesUpdated: !!productData.msds && productData.msds !== preserveExisting.msds,
-        certificationFilesUpdated: !!productData.certifications?.qualityStandards && 
-          productData.certifications.qualityStandards !== preserveExisting.qualityStandards
+      stats: {
+        ingredientsCount: updatedProduct.composition?.ingredients?.length || 0,
+        advantagesCount: updatedProduct.composition?.advantages?.length || 0,
+        instructionsCount: updatedProduct.application?.instructions?.length || 0,
+        cropsCount: updatedProduct.application?.recommendedCrops?.length || 0,
+        ppeCount: updatedProduct.safety?.ppe?.instructions?.length || 0,
+        hygieneCount: updatedProduct.safety?.hygiene?.instructions?.length || 0,
+        phonesCount: updatedProduct.contact?.phones?.length || 0
       }
     });
   } catch (error) {
@@ -1438,7 +1517,10 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Failed to update product',
-      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: process.env.NODE_ENV === 'development' ? {
+        stack: error.stack,
+        name: error.name
+      } : undefined
     });
   }
 });
@@ -1656,7 +1738,6 @@ app.delete('/api/batches/:batchId', authenticateToken, async (req, res) => {
     });
   }
 });
-
 
 // Enhanced Product View Route (for QR code access)
 app.get('/api/product-view/:batchId', async (req, res) => {
