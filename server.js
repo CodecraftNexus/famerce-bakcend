@@ -1329,7 +1329,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       });
     }
 
-    // Preserve existing file paths if no new files uploaded
+    // FIXED: Preserve existing file paths correctly
     const preserveExistingFiles = {
       imagePath: existingProduct.imagePath,
       npsApproval: existingProduct.npsApproval,
@@ -1337,7 +1337,9 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       qualityStandards: existingProduct.certifications?.qualityStandards
     };
 
-    // Handle file uploads with enhanced error handling
+    console.log('🔍 Preserving existing files:', preserveExistingFiles);
+
+    // FIXED: Handle file uploads with better logic
     if (USE_CLOUDINARY) {
       console.log('🔗 Using Cloudinary for file updates');
       
@@ -1358,19 +1360,21 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       } else {
         // Keep existing image
         productData.imagePath = preserveExistingFiles.imagePath;
+        console.log('📸 Keeping existing image:', productData.imagePath);
       }
 
-      // Handle NPS approval files
+      // FIXED: Handle NPS approval files properly
       if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
         try {
-          console.log('📄 Updating NPS approval files...');
+          console.log('📄 Updating NPS approval files:', req.files.npsApprovalFiles.length, 'files');
           const npsUrls = [];
           for (const file of req.files.npsApprovalFiles) {
+            console.log('📄 Uploading NPS file:', file.originalname);
             const url = await handleFileUpload(file, 'documents');
             npsUrls.push(url);
           }
           productData.npsApproval = npsUrls.join(', ');
-          console.log('✅ NPS files updated:', npsUrls.length, 'files');
+          console.log('✅ NPS files updated:', npsUrls);
         } catch (error) {
           console.error('❌ NPS files update error:', error);
           return res.status(500).json({
@@ -1381,19 +1385,21 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       } else {
         // Keep existing NPS files
         productData.npsApproval = preserveExistingFiles.npsApproval;
+        console.log('📄 Keeping existing NPS files:', productData.npsApproval);
       }
 
-      // Handle MSDS files
+      // FIXED: Handle MSDS files properly
       if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
         try {
-          console.log('📄 Updating MSDS files...');
+          console.log('📄 Updating MSDS files:', req.files.msdsFiles.length, 'files');
           const msdsUrls = [];
           for (const file of req.files.msdsFiles) {
+            console.log('📄 Uploading MSDS file:', file.originalname);
             const url = await handleFileUpload(file, 'documents');
             msdsUrls.push(url);
           }
           productData.msds = msdsUrls.join(', ');
-          console.log('✅ MSDS files updated:', msdsUrls.length, 'files');
+          console.log('✅ MSDS files updated:', msdsUrls);
         } catch (error) {
           console.error('❌ MSDS files update error:', error);
           return res.status(500).json({
@@ -1404,14 +1410,16 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       } else {
         // Keep existing MSDS files
         productData.msds = preserveExistingFiles.msds;
+        console.log('📄 Keeping existing MSDS files:', productData.msds);
       }
 
-      // Handle certification files
+      // FIXED: Handle certification files properly
       if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
         try {
-          console.log('📄 Updating certification files...');
+          console.log('📄 Updating certification files:', req.files.certificationsFiles.length, 'files');
           const certUrls = [];
           for (const file of req.files.certificationsFiles) {
+            console.log('📄 Uploading certification file:', file.originalname);
             const url = await handleFileUpload(file, 'documents');
             certUrls.push(url);
           }
@@ -1419,7 +1427,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
             productData.certifications = productData.certifications || {};
             productData.certifications.qualityStandards = certUrls.join(', ');
           }
-          console.log('✅ Certification files updated:', certUrls.length, 'files');
+          console.log('✅ Certification files updated:', certUrls);
         } catch (error) {
           console.error('❌ Certification files update error:', error);
           return res.status(500).json({
@@ -1433,9 +1441,10 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
           productData.certifications = {};
         }
         productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
+        console.log('📄 Keeping existing certification files:', productData.certifications.qualityStandards);
       }
     } else {
-      // Local file handling for updates
+      // FIXED: Local file handling for updates
       console.log('💾 Using local storage for file updates');
       
       if (req.files && req.files.image && req.files.image[0]) {
@@ -1449,7 +1458,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
         productData.npsApproval = req.files.npsApprovalFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('✅ NPS files saved locally');
+        console.log('✅ NPS files saved locally:', productData.npsApproval);
       } else {
         productData.npsApproval = preserveExistingFiles.npsApproval;
       }
@@ -1458,7 +1467,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
         productData.msds = req.files.msdsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('✅ MSDS files saved locally');
+        console.log('✅ MSDS files saved locally:', productData.msds);
       } else {
         productData.msds = preserveExistingFiles.msds;
       }
@@ -1468,7 +1477,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
         productData.certifications.qualityStandards = req.files.certificationsFiles
           .map(file => `/uploads/documents/${file.filename}`)
           .join(', ');
-        console.log('✅ Certification files saved locally');
+        console.log('✅ Certification files saved locally:', productData.certifications.qualityStandards);
       } else {
         if (!productData.certifications) {
           productData.certifications = {};
@@ -1476,6 +1485,14 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
         productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
       }
     }
+
+    // FIXED: Debug log before update
+    console.log('🔍 Final data before update:', {
+      imagePath: productData.imagePath,
+      npsApproval: productData.npsApproval,
+      msds: productData.msds,
+      qualityStandards: productData.certifications?.qualityStandards
+    });
 
     // Update the product
     console.log('💾 Updating product in database...');
@@ -1485,7 +1502,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       { 
         new: true, 
         runValidators: true,
-        upsert: false // Ensure we don't create a new product
+        upsert: false
       }
     );
 
