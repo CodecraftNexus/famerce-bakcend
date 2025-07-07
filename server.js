@@ -649,7 +649,10 @@ app.use((error, req, res, next) => {
 app.get('/api/documents/:filename', async (req, res) => {
   try {
     const { filename } = req.params;
+    const { download = 'true' } = req.query; // Add download query parameter
+    
     console.log('📄 Document request for:', filename);
+    console.log('💾 Download mode:', download);
     
     if (!filename) {
       return res.status(400).json({
@@ -660,31 +663,115 @@ app.get('/api/documents/:filename', async (req, res) => {
     
     const decodedFilename = decodeURIComponent(filename);
     
-    // If it's already a full URL, redirect to it
-    if (decodedFilename.startsWith('http')) {
-      console.log('🔄 Redirecting to existing URL:', decodedFilename);
-      return res.redirect(decodedFilename);
+    // If it's already a full Cloudinary URL, extract the public_id
+    let publicId = decodedFilename;
+    if (decodedFilename.startsWith('https://res.cloudinary.com/')) {
+      const urlParts = decodedFilename.split('/');
+      const uploadIndex = urlParts.findIndex(part => part === 'upload');
+      if (uploadIndex !== -1 && uploadIndex < urlParts.length - 2) {
+        // Skip version if present (v1234567890)
+        let startIndex = uploadIndex + 1;
+        if (urlParts[startIndex] && urlParts[startIndex].startsWith('v')) {
+          startIndex++;
+        }
+        publicId = urlParts.slice(startIndex).join('/');
+        // Remove file extension for public_id
+        publicId = publicId.replace(/\.[^/.]+$/, '');
+      }
+    } else if (publicId.includes('/')) {
+      // Handle relative paths - remove extension
+      publicId = publicId.replace(/\.[^/.]+$/, '');
+    } else {
+      // Simple filename - remove extension
+      publicId = publicId.replace(/\.[^/.]+$/, '');
     }
     
-    // For Cloudinary documents, construct the URL
+    console.log('🔍 Extracted public_id:', publicId);
+    
     try {
-      // Try to generate a signed URL for secure access
-      const cloudUrl = cloudinary.url(decodedFilename, {
+      // Get file info from Cloudinary to determine the actual format
+      const fileInfo = await cloudinary.api.resource(publicId, { 
+        resource_type: 'raw' 
+      });
+      
+      console.log('📋 File info:', {
+        public_id: fileInfo.public_id,
+        format: fileInfo.format,
+        bytes: fileInfo.bytes,
+        secure_url: fileInfo.secure_url
+      });
+      
+      // Generate download URL with proper headers
+      const downloadUrl = cloudinary.url(publicId, {
         resource_type: 'raw',
         secure: true,
         sign_url: true,
-        type: 'upload'
+        type: 'upload',
+        flags: download === 'true' ? 'attachment' : undefined
       });
       
-      console.log('🔄 Redirecting to Cloudinary URL:', cloudUrl);
-      res.redirect(cloudUrl);
-    } catch (cloudError) {
-      console.error('❌ Cloudinary URL generation error:', cloudError);
+      console.log('🔗 Generated download URL:', downloadUrl);
       
-      // Fallback to basic URL
-      const fallbackUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${decodedFilename}`;
+      // For direct downloads, we'll proxy the file through our server
+      if (download === 'true') {
+        // Fetch the file from Cloudinary
+        const fetch = require('node-fetch');
+        const response = await fetch(downloadUrl);
+        
+        if (!response.ok) {
+          throw new Error(`Failed to fetch file: ${response.statusText}`);
+        }
+        
+        // Get original filename from public_id or use a default
+        const originalFilename = publicId.split('/').pop() + (fileInfo.format ? `.${fileInfo.format}` : '');
+        
+        // Set proper headers for download
+        res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
+        res.setHeader('Content-Length', response.headers.get('content-length'));
+        res.setHeader('Content-Disposition', `attachment; filename="${originalFilename}"`);
+        res.setHeader('Cache-Control', 'no-cache');
+        
+        console.log('📥 Streaming file download:', originalFilename);
+        
+        // Stream the file to client
+        response.body.pipe(res);
+      } else {
+        // For preview/view, redirect to Cloudinary URL
+        console.log('👁️ Redirecting for preview:', downloadUrl);
+        res.redirect(downloadUrl);
+      }
+      
+    } catch (cloudError) {
+      console.error('❌ Cloudinary API error:', cloudError);
+      
+      // Fallback: try to redirect to direct URL
+      const fallbackUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${publicId}`;
       console.log('🔄 Using fallback URL:', fallbackUrl);
-      res.redirect(fallbackUrl);
+      
+      if (download === 'true') {
+        // For downloads, try to fetch and stream the fallback URL
+        try {
+          const fetch = require('node-fetch');
+          const response = await fetch(fallbackUrl);
+          
+          if (response.ok) {
+            const filename = publicId.split('/').pop() || 'document';
+            res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            response.body.pipe(res);
+          } else {
+            throw new Error('Fallback URL also failed');
+          }
+        } catch (fetchError) {
+          console.error('❌ Fallback fetch error:', fetchError);
+          res.status(404).json({
+            success: false,
+            message: 'Document not found or inaccessible'
+          });
+        }
+      } else {
+        res.redirect(fallbackUrl);
+      }
     }
     
   } catch (error) {
@@ -695,7 +782,6 @@ app.get('/api/documents/:filename', async (req, res) => {
     });
   }
 });
-
 // Serve images with optimization
 app.get('/api/images/:filename', async (req, res) => {
   try {
@@ -745,10 +831,118 @@ app.get('/api/images/:filename', async (req, res) => {
   }
 });
 
+
+app.get('/api/download/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    console.log('📥 Direct download request for:', filename);
+    
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        message: 'Filename is required'
+      });
+    }
+    
+    const decodedFilename = decodeURIComponent(filename);
+    
+    // Extract public_id from various URL formats
+    let publicId = decodedFilename;
+    if (decodedFilename.startsWith('https://res.cloudinary.com/')) {
+      const urlParts = decodedFilename.split('/');
+      const uploadIndex = urlParts.findIndex(part => part === 'upload');
+      if (uploadIndex !== -1) {
+        let startIndex = uploadIndex + 1;
+        // Skip version if present
+        if (urlParts[startIndex] && urlParts[startIndex].startsWith('v')) {
+          startIndex++;
+        }
+        publicId = urlParts.slice(startIndex).join('/');
+        publicId = publicId.replace(/\.[^/.]+$/, ''); // Remove extension
+      }
+    } else {
+      publicId = publicId.replace(/\.[^/.]+$/, ''); // Remove extension
+    }
+    
+    console.log('📋 Processing download for public_id:', publicId);
+    
+    try {
+      // Get file metadata from Cloudinary
+      const fileInfo = await cloudinary.api.resource(publicId, { 
+        resource_type: 'raw' 
+      });
+      
+      // Generate a signed URL for secure download
+      const secureUrl = cloudinary.url(publicId, {
+        resource_type: 'raw',
+        secure: true,
+        sign_url: true,
+        type: 'upload'
+      });
+      
+      console.log('🔐 Generated secure URL for download');
+      
+      // Fetch and stream the file
+      const fetch = require('node-fetch');
+      const response = await fetch(secureUrl);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      // Determine filename
+      const originalFilename = publicId.split('/').pop() + (fileInfo.format ? `.${fileInfo.format}` : '.pdf');
+      
+      // Set download headers
+      res.setHeader('Content-Type', response.headers.get('content-type') || 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${originalFilename}"`);
+      res.setHeader('Content-Length', response.headers.get('content-length') || fileInfo.bytes);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      
+      console.log('✅ Streaming download:', originalFilename);
+      
+      // Stream the file
+      response.body.pipe(res);
+      
+    } catch (apiError) {
+      console.error('❌ Cloudinary API error, trying direct URL:', apiError.message);
+      
+      // Fallback to direct URL construction
+      const directUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${publicId}`;
+      
+      const fetch = require('node-fetch');
+      const response = await fetch(directUrl);
+      
+      if (!response.ok) {
+        throw new Error(`Direct URL failed: HTTP ${response.status}`);
+      }
+      
+      const filename = publicId.split('/').pop() || 'document.pdf';
+      
+      res.setHeader('Content-Type', response.headers.get('content-type') || 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', response.headers.get('content-length'));
+      
+      console.log('✅ Fallback download successful:', filename);
+      response.body.pipe(res);
+    }
+    
+  } catch (error) {
+    console.error('❌ Download error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Download failed: ' + error.message,
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
 // Enhanced signed URL generation for documents
 app.post('/api/documents/get-signed-url', authenticateToken, async (req, res) => {
   try {
-    const { filePath, type = 'documents' } = req.body;
+    const { filePath, type = 'download' } = req.body;
     console.log('🔐 Generating signed URL for:', filePath);
     
     if (!filePath) {
@@ -758,45 +952,83 @@ app.post('/api/documents/get-signed-url', authenticateToken, async (req, res) =>
       });
     }
     
-    let actualPath = filePath.trim();
+    let publicId = filePath.trim();
     
-    // Extract filename from various URL formats
-    if (actualPath.startsWith('https://res.cloudinary.com/')) {
-      // Extract public_id from full Cloudinary URL
-      const urlParts = actualPath.split('/');
-      const uploadIndex = urlParts.indexOf('upload');
-      if (uploadIndex !== -1 && uploadIndex < urlParts.length - 1) {
-        actualPath = urlParts.slice(uploadIndex + 1).join('/');
-        // Remove file extension for public_id
-        actualPath = actualPath.replace(/\.[^/.]+$/, '');
+    // Extract public_id from various URL formats
+    if (publicId.startsWith('https://res.cloudinary.com/')) {
+      const urlParts = publicId.split('/');
+      const uploadIndex = urlParts.findIndex(part => part === 'upload');
+      if (uploadIndex !== -1) {
+        let startIndex = uploadIndex + 1;
+        if (urlParts[startIndex] && urlParts[startIndex].startsWith('v')) {
+          startIndex++;
+        }
+        publicId = urlParts.slice(startIndex).join('/');
+        publicId = publicId.replace(/\.[^/.]+$/, '');
       }
-    } else if (actualPath.includes('/')) {
-      // Handle relative paths
-      const segments = actualPath.split('/');
-      actualPath = segments[segments.length - 1];
-      actualPath = actualPath.replace(/\.[^/.]+$/, '');
     } else {
-      // Remove extension if present
-      actualPath = actualPath.replace(/\.[^/.]+$/, '');
+      publicId = publicId.replace(/\.[^/.]+$/, '');
     }
     
-    // Generate signed URL
-    const signedUrl = cloudinary.url(actualPath, {
-      resource_type: 'raw',
-      secure: true,
-      sign_url: true,
-      type: 'upload',
-      attachment: true // Force download
-    });
+    console.log('📋 Extracted public_id:', publicId);
     
-    console.log('✅ Generated signed URL for public_id:', actualPath);
-    
-    res.json({
-      success: true,
-      signedUrl: signedUrl,
-      actualPath: actualPath,
-      originalPath: filePath
-    });
+    try {
+      // Verify file exists
+      const fileInfo = await cloudinary.api.resource(publicId, { 
+        resource_type: 'raw' 
+      });
+      
+      // Generate appropriate URL based on type
+      const urlOptions = {
+        resource_type: 'raw',
+        secure: true,
+        sign_url: true,
+        type: 'upload'
+      };
+      
+      if (type === 'download') {
+        urlOptions.flags = 'attachment';
+      }
+      
+      const signedUrl = cloudinary.url(publicId, urlOptions);
+      
+      // Also provide a direct download link through our server
+      const serverDownloadUrl = `/api/download/${encodeURIComponent(filePath)}`;
+      
+      console.log('✅ Generated signed URLs successfully');
+      
+      res.json({
+        success: true,
+        signedUrl: signedUrl,
+        serverDownloadUrl: serverDownloadUrl,
+        directDownloadUrl: `/api/documents/${encodeURIComponent(filePath)}?download=true`,
+        fileInfo: {
+          publicId: publicId,
+          format: fileInfo.format,
+          size: fileInfo.bytes,
+          originalPath: filePath
+        }
+      });
+      
+    } catch (cloudError) {
+      console.error('❌ File verification failed:', cloudError.message);
+      
+      // Still provide URLs even if verification fails
+      const fallbackUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${publicId}`;
+      const serverDownloadUrl = `/api/download/${encodeURIComponent(filePath)}`;
+      
+      res.json({
+        success: true,
+        warning: 'File verification failed, providing fallback URLs',
+        signedUrl: fallbackUrl,
+        serverDownloadUrl: serverDownloadUrl,
+        directDownloadUrl: `/api/documents/${encodeURIComponent(filePath)}?download=true`,
+        fileInfo: {
+          publicId: publicId,
+          originalPath: filePath
+        }
+      });
+    }
     
   } catch (error) {
     console.error('❌ Signed URL generation error:', error);
