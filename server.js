@@ -536,35 +536,67 @@ const validateProductData = (productData) => {
   return errors;
 };
 
-// File Upload Handler for Cloudinary
+// FIXED File Upload Handler for Cloudinary with Enhanced Document Support
 const handleFileUpload = async (file, type = 'document') => {
-  console.log(`📤 Starting ${type} upload for file:`, file.originalname);
+  console.log(`📤 Starting ${type} upload for file:`, {
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+    size: file.size,
+    fieldname: file.fieldname
+  });
 
   return new Promise((resolve, reject) => {
+    // FIXED: Enhanced upload options based on Cloudinary best practices
     const uploadOptions = {
       folder: type === 'image' ? 'products' : 'documents',
-      resource_type: type === 'image' ? 'image' : 'raw',
+      resource_type: type === 'image' ? 'image' : 'raw', // CRITICAL: Must be 'raw' for documents
       use_filename: true,
       unique_filename: true,
-      timeout: 60000, // 60 second timeout
+      timeout: 120000, // Increased timeout to 2 minutes for large documents
+      // ADDED: Preserve original filename for documents
+      filename_override: type !== 'image' ? file.originalname : undefined,
+      // ADDED: Better public ID for documents to avoid conflicts
+      public_id: type !== 'image' ? `documents/${Date.now()}_${file.originalname.split('.')[0]}` : undefined
     };
 
+    // Only add transformations for images, NOT for documents
     if (type === 'image') {
       uploadOptions.transformation = [
         { width: 1200, height: 900, crop: 'limit', quality: 'auto:good' }
       ];
     }
 
-    console.log('Upload options:', uploadOptions);
+    console.log('📋 Upload options:', uploadOptions);
 
     const uploadStream = cloudinary.uploader.upload_stream(
       uploadOptions,
       (error, result) => {
         if (error) {
-          console.error('❌ Cloudinary upload error:', error);
-          reject(new Error(`Cloudinary upload failed: ${error.message}`));
+          console.error('❌ Cloudinary upload error:', {
+            message: error.message,
+            http_code: error.http_code,
+            error_code: error.error_code || 'No error code',
+            api_key: error.api_key ? 'Present' : 'Missing'
+          });
+          
+          // ADDED: Check for specific document upload errors
+          if (error.message && error.message.includes('resource_type')) {
+            reject(new Error(`Document upload failed - resource type issue: ${error.message}. Make sure you're uploading documents as 'raw' type.`));
+          } else if (error.message && error.message.includes('format')) {
+            reject(new Error(`Document upload failed - format issue: ${error.message}. File type might not be supported.`));
+          } else if (error.message && error.message.includes('delivery')) {
+            reject(new Error(`Document upload failed - delivery issue: ${error.message}. For free accounts, enable PDF/ZIP delivery in Cloudinary Settings > Security.`));
+          } else {
+            reject(new Error(`Cloudinary upload failed: ${error.message}`));
+          }
         } else {
-          console.log('✅ Cloudinary upload success:', result.secure_url);
+          console.log('✅ Cloudinary upload success:', {
+            secure_url: result.secure_url,
+            public_id: result.public_id,
+            resource_type: result.resource_type,
+            format: result.format,
+            bytes: result.bytes
+          });
           resolve(result.secure_url);
         }
       }
@@ -576,6 +608,8 @@ const handleFileUpload = async (file, type = 'document') => {
       reject(new Error(`Upload stream failed: ${error.message}`));
     });
 
+    // CRITICAL: Make sure we're sending the buffer properly
+    console.log('📦 Sending file buffer, size:', file.buffer.length);
     uploadStream.end(file.buffer);
   });
 };
@@ -740,44 +774,159 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Debug route to test file uploads
-app.post('/api/debug/upload', authenticateToken, uploadFields, (req, res) => {
+// Debug route to test document uploads specifically
+app.post('/api/debug/document-upload', authenticateToken, uploadFields, async (req, res) => {
   try {
-    console.log('🧪 Debug upload test');
+    console.log('🧪 Debug document upload test');
     console.log('📁 Received files:', req.files);
     console.log('📝 Received body:', Object.keys(req.body));
     
-    const fileInfo = {};
+    const results = {
+      success: true,
+      uploadResults: {},
+      errors: [],
+      cloudinaryConfig: {
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME ? 'Set' : 'Missing',
+        api_key: process.env.CLOUDINARY_API_KEY ? 'Set' : 'Missing',
+        api_secret: process.env.CLOUDINARY_API_SECRET ? 'Set' : 'Missing'
+      }
+    };
+    
+    // Test Cloudinary connection first
+    try {
+      await cloudinary.api.ping();
+      console.log('✅ Cloudinary connection test passed');
+      results.cloudinaryConnection = 'Success';
+    } catch (error) {
+      console.error('❌ Cloudinary connection test failed:', error);
+      results.cloudinaryConnection = 'Failed: ' + error.message;
+      results.errors.push('Cloudinary connection failed');
+    }
     
     if (req.files) {
-      Object.keys(req.files).forEach(fieldName => {
-        fileInfo[fieldName] = req.files[fieldName].map(file => ({
-          originalname: file.originalname,
-          mimetype: file.mimetype,
-          size: file.size,
-          fieldname: file.fieldname
-        }));
-      });
+      // Process each file type
+      for (const [fieldName, files] of Object.entries(req.files)) {
+        console.log(`📄 Processing ${fieldName} files:`, files.length);
+        results.uploadResults[fieldName] = [];
+        
+        for (const file of files) {
+          try {
+            console.log(`📤 Uploading ${file.originalname}...`);
+            
+            // Determine upload type
+            const uploadType = fieldName === 'image' ? 'image' : 'documents';
+            
+            // Upload file
+            const uploadUrl = await handleFileUpload(file, uploadType);
+            
+            results.uploadResults[fieldName].push({
+              originalname: file.originalname,
+              mimetype: file.mimetype,
+              size: file.size,
+              uploadUrl: uploadUrl,
+              status: 'Success'
+            });
+            
+            console.log(`✅ Successfully uploaded ${file.originalname}`);
+            
+          } catch (uploadError) {
+            console.error(`❌ Failed to upload ${file.originalname}:`, uploadError);
+            results.uploadResults[fieldName].push({
+              originalname: file.originalname,
+              mimetype: file.mimetype,
+              size: file.size,
+              status: 'Failed',
+              error: uploadError.message
+            });
+            results.errors.push(`Upload failed for ${file.originalname}: ${uploadError.message}`);
+          }
+        }
+      }
+    }
+    
+    res.json({
+      success: results.errors.length === 0,
+      message: results.errors.length === 0 ? 'All uploads successful' : 'Some uploads failed',
+      results: results,
+      troubleshooting: {
+        commonIssues: [
+          'Check if Cloudinary credentials are correctly set',
+          'Verify that PDF/ZIP delivery is enabled in Cloudinary Security settings (for free accounts)',
+          'Ensure file types are supported (PDF, DOC, DOCX, TXT)',
+          'Check file size limits (50MB max)',
+          'Verify resource_type is set to "raw" for documents'
+        ],
+        cloudinarySettings: 'Check Settings > Security > Allow delivery of PDF and ZIP files (for free accounts)'
+      }
+    });
+    
+  } catch (error) {
+    console.error('🧪 Debug document upload error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Debug document upload failed',
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// Check Cloudinary account settings
+app.get('/api/debug/cloudinary-info', authenticateToken, async (req, res) => {
+  try {
+    console.log('🔍 Checking Cloudinary account info...');
+    
+    const info = {
+      configured: {
+        cloud_name: !!process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: !!process.env.CLOUDINARY_API_KEY,
+        api_secret: !!process.env.CLOUDINARY_API_SECRET
+      },
+      connection: null,
+      usage: null
+    };
+    
+    try {
+      // Test connection
+      await cloudinary.api.ping();
+      info.connection = 'Success';
+      console.log('✅ Cloudinary ping successful');
+      
+      // Try to get usage info (might fail on free accounts)
+      try {
+        const usage = await cloudinary.api.usage();
+        info.usage = {
+          plan: usage.plan || 'Unknown',
+          credits_used: usage.credits_used || 0,
+          credits_limit: usage.credits_limit || 0
+        };
+        console.log('✅ Got usage info:', info.usage);
+      } catch (usageError) {
+        info.usage = 'Unable to fetch (might be restricted)';
+        console.log('⚠️ Could not fetch usage info:', usageError.message);
+      }
+      
+    } catch (connectionError) {
+      info.connection = 'Failed: ' + connectionError.message;
+      console.error('❌ Cloudinary connection failed:', connectionError);
     }
     
     res.json({
       success: true,
-      message: 'Debug upload successful',
-      files: fileInfo,
-      body: req.body,
-      multerConfig: {
-        storageType: 'cloudinary',
-        limits: {
-          fileSize: '50MB',
-          files: 'Multiple per field'
-        }
-      }
+      cloudinary: info,
+      recommendations: [
+        'If on free plan: Enable PDF/ZIP delivery in Settings > Security',
+        'Verify all environment variables are set correctly',
+        'Check upload preset settings if using unsigned uploads',
+        'Ensure resource_type is "raw" for document uploads'
+      ]
     });
+    
   } catch (error) {
-    console.error('🧪 Debug upload error:', error);
+    console.error('❌ Cloudinary info check failed:', error);
     res.status(500).json({
       success: false,
-      message: 'Debug upload failed',
+      message: 'Failed to check Cloudinary info',
       error: error.message
     });
   }
