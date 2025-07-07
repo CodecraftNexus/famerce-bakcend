@@ -4,18 +4,13 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
-// Environment variable to choose storage type
-const USE_CLOUDINARY = process.env.USE_CLOUDINARY === 'true';
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI, {
@@ -58,161 +53,85 @@ if (process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1);
 }
 
-// Local Storage Setup
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!USE_CLOUDINARY && !fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-  fs.mkdirSync(path.join(uploadsDir, 'products'), { recursive: true });
-  fs.mkdirSync(path.join(uploadsDir, 'documents'), { recursive: true });
+// Cloudinary Configuration - REQUIRED
+if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+  console.error('❌ Missing required Cloudinary environment variables');
+  console.error('Required: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET');
+  console.error('Current values:');
+  console.error('- CLOUDINARY_CLOUD_NAME:', process.env.CLOUDINARY_CLOUD_NAME ? 'Set' : 'Missing');
+  console.error('- CLOUDINARY_API_KEY:', process.env.CLOUDINARY_API_KEY ? 'Set' : 'Missing');
+  console.error('- CLOUDINARY_API_SECRET:', process.env.CLOUDINARY_API_SECRET ? 'Set' : 'Missing');
+  process.exit(1);
 }
 
-// Serve static files for local storage
-if (!USE_CLOUDINARY) {
-  app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-}
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure: true // Always use HTTPS
+});
 
-// FIXED Cloudinary Configuration
-if (USE_CLOUDINARY) {
-  // Validate required environment variables
-  if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-    console.error('❌ Missing required Cloudinary environment variables');
-    console.error('Required: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET');
-    console.error('Current values:');
-    console.error('- CLOUDINARY_CLOUD_NAME:', process.env.CLOUDINARY_CLOUD_NAME ? 'Set' : 'Missing');
-    console.error('- CLOUDINARY_API_KEY:', process.env.CLOUDINARY_API_KEY ? 'Set' : 'Missing');
-    console.error('- CLOUDINARY_API_SECRET:', process.env.CLOUDINARY_API_SECRET ? 'Set' : 'Missing');
+// Test the configuration
+cloudinary.api.ping()
+  .then(() => {
+    console.log('🔗 Cloudinary storage configured and tested successfully');
+    console.log(`📁 Cloud name: ${process.env.CLOUDINARY_CLOUD_NAME}`);
+  })
+  .catch((error) => {
+    console.error('❌ Cloudinary configuration test failed:', error.message);
+    console.error('Please check your Cloudinary credentials in .env file');
     process.exit(1);
-  }
-
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-    secure: true // Always use HTTPS
   });
 
-  // Test the configuration
-  cloudinary.api.ping()
-    .then(() => {
-      console.log('🔗 Cloudinary storage configured and tested successfully');
-      console.log(`📁 Cloud name: ${process.env.CLOUDINARY_CLOUD_NAME}`);
-    })
-    .catch((error) => {
-      console.error('❌ Cloudinary configuration test failed:', error.message);
-      console.error('Please check your Cloudinary credentials in .env file');
+// Multer Configuration - Memory Storage Only for Cloudinary
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { 
+    fileSize: 50 * 1024 * 1024, // 50MB
+    files: 50, // Max 50 files total
+    fields: 20, // Max 20 non-file fields
+    fieldSize: 50 * 1024 * 1024, // 50MB per field
+    fieldNameSize: 200, // Max field name length
+    headerPairs: 2000 // Max header pairs
+  },
+  fileFilter: function (req, file, cb) {
+    console.log('🔍 File filter check:', {
+      fieldname: file.fieldname,
+      mimetype: file.mimetype,
+      originalname: file.originalname
     });
-} else {
-  console.log('💾 Local file storage configured');
-}
 
-
-// ENHANCED Multer Configuration with Better Error Handling
-const createMulterUpload = () => {
-  if (USE_CLOUDINARY) {
-    return multer({
-      storage: multer.memoryStorage(),
-      limits: { 
-        fileSize: 50 * 1024 * 1024, // 50MB
-        files: 50, // Max 50 files total
-        fields: 20, // Max 20 non-file fields
-        fieldSize: 50 * 1024 * 1024, // 50MB per field
-        fieldNameSize: 200, // Max field name length
-        headerPairs: 2000 // Max header pairs
-      },
-      fileFilter: function (req, file, cb) {
-        console.log('🔍 File filter check:', {
-          fieldname: file.fieldname,
-          mimetype: file.mimetype,
-          originalname: file.originalname
-        });
-
-        // Image files
-        if (file.fieldname === 'image') {
-          if (file.mimetype.startsWith('image/')) {
-            cb(null, true);
-          } else {
-            cb(new Error(`Invalid image file type: ${file.mimetype}. Only image files are allowed.`));
-          }
-        } 
-        // Document files - support both array and single file formats
-        else if (['npsApprovalFiles', 'msdsFiles', 'certificationsFiles'].includes(file.fieldname) ||
-                 file.fieldname.endsWith('[]')) { // Support array notation
-          const allowedTypes = [
-            'application/pdf', 
-            'application/msword', 
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'text/plain'
-          ];
-          if (allowedTypes.includes(file.mimetype)) {
-            cb(null, true);
-          } else {
-            cb(new Error(`Invalid document file type: ${file.mimetype}. Only PDF, DOC, DOCX, and TXT files are allowed.`));
-          }
-        } else {
-          console.warn('⚠️ Unknown field:', file.fieldname);
-          // Instead of rejecting, log and accept to prevent unexpected field errors
-          cb(null, true);
-        }
+    // Image files
+    if (file.fieldname === 'image') {
+      if (file.mimetype.startsWith('image/')) {
+        cb(null, true);
+      } else {
+        cb(new Error(`Invalid image file type: ${file.mimetype}. Only image files are allowed.`));
       }
-    });
-  } else {
-    // Local storage configuration
-    const storage = multer.diskStorage({
-      destination: function (req, file, cb) {
-        let uploadPath = 'uploads/';
-        
-        if (file.fieldname === 'image') {
-          uploadPath += 'products/';
-        } else {
-          uploadPath += 'documents/';
-        }
-        
-        cb(null, uploadPath);
-      },
-      filename: function (req, file, cb) {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    } 
+    // Document files - support both array and single file formats
+    else if (['npsApprovalFiles', 'msdsFiles', 'certificationsFiles'].includes(file.fieldname) ||
+             file.fieldname.endsWith('[]')) { // Support array notation
+      const allowedTypes = [
+        'application/pdf', 
+        'application/msword', 
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'text/plain'
+      ];
+      if (allowedTypes.includes(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new Error(`Invalid document file type: ${file.mimetype}. Only PDF, DOC, DOCX, and TXT files are allowed.`));
       }
-    });
-
-    return multer({ 
-      storage: storage,
-      limits: {
-        fileSize: 50 * 1024 * 1024, // 50MB limit
-        files: 50,
-        fields: 20,
-        fieldSize: 50 * 1024 * 1024,
-        fieldNameSize: 200,
-        headerPairs: 2000
-      },
-      fileFilter: function (req, file, cb) {
-        if (file.fieldname === 'image') {
-          if (file.mimetype.startsWith('image/')) {
-            cb(null, true);
-          } else {
-            cb(new Error('Only image files are allowed for product images'));
-          }
-        } else {
-          const allowedTypes = [
-            'application/pdf', 
-            'application/msword', 
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-          ];
-          if (allowedTypes.includes(file.mimetype)) {
-            cb(null, true);
-          } else {
-            cb(new Error('Only PDF, DOC, and DOCX files are allowed for documents'));
-          }
-        }
-      }
-    });
+    } else {
+      console.warn('⚠️ Unknown field:', file.fieldname);
+      // Instead of rejecting, log and accept to prevent unexpected field errors
+      cb(null, true);
+    }
   }
-};
+});
 
-// Create upload instance
-const upload = createMulterUpload();
-
-// FIXED: More flexible field configuration for both create and update routes
+// Upload fields configuration
 const uploadFields = upload.fields([
   { name: 'image', maxCount: 1 },
   { name: 'npsApprovalFiles', maxCount: 10 },
@@ -266,7 +185,7 @@ userSchema.pre('save', async function(next) {
 
 const User = mongoose.model('User', userSchema);
 
-// ENHANCED Product Schema with Dynamic Lists Support
+// Enhanced Product Schema with Dynamic Lists Support
 const productSchema = new mongoose.Schema({
   productId: {
     type: String,
@@ -302,7 +221,7 @@ const productSchema = new mongoose.Schema({
   },
   application: {
     title: { type: String, default: "Application Details" },
-    instructions: [String], // ENHANCED: Changed from String to Array for dynamic lists
+    instructions: [String],
     recommendedCrops: [String]
   },
   safety: {
@@ -512,7 +431,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// ENHANCED Data Processing Helper Functions
+// Data Processing Helper Functions
 const processProductData = (productData) => {
   console.log('🔄 Processing product data:', {
     name: productData.name,
@@ -541,7 +460,7 @@ const processProductData = (productData) => {
   }
   
   if (productData.application) {
-    // Process instructions array - ENHANCED
+    // Process instructions array
     if (productData.application.instructions && Array.isArray(productData.application.instructions)) {
       productData.application.instructions = productData.application.instructions.filter(inst => 
         inst && inst.trim()
@@ -617,18 +536,13 @@ const validateProductData = (productData) => {
   return errors;
 };
 
-// FIXED File Upload Handler for Cloudinary
+// File Upload Handler for Cloudinary
 const handleFileUpload = async (file, type = 'document') => {
-  if (!USE_CLOUDINARY) {
-    throw new Error('Cloudinary upload called but not configured');
-  }
-
   console.log(`📤 Starting ${type} upload for file:`, file.originalname);
 
   return new Promise((resolve, reject) => {
-    // FIXED: Use proper folder structure without hardcoded cloud name
     const uploadOptions = {
-      folder: type === 'image' ? 'products' : 'documents', // Removed hardcoded cloud name
+      folder: type === 'image' ? 'products' : 'documents',
       resource_type: type === 'image' ? 'image' : 'raw',
       use_filename: true,
       unique_filename: true,
@@ -723,7 +637,7 @@ const updateExistingBatches = async () => {
   }
 };
 
-// ENHANCED ERROR HANDLING - Add this before other routes
+// Error handling middleware
 app.use((error, req, res, next) => {
   console.error('🚨 Error caught by middleware:', {
     name: error.name,
@@ -768,34 +682,6 @@ app.use((error, req, res, next) => {
           }
         });
       
-      case 'LIMIT_PART_COUNT':
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Too many form parts. Please reduce the number of form fields.',
-          errorCode: 'TOO_MANY_PARTS'
-        });
-      
-      case 'LIMIT_FIELD_KEY':
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Field name too long.',
-          errorCode: 'FIELD_NAME_TOO_LONG'
-        });
-      
-      case 'LIMIT_FIELD_VALUE':
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Field value too long.',
-          errorCode: 'FIELD_VALUE_TOO_LONG'
-        });
-      
-      case 'LIMIT_FIELD_COUNT':
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Too many fields in form.',
-          errorCode: 'TOO_MANY_FIELDS'
-        });
-      
       default:
         return res.status(400).json({ 
           success: false, 
@@ -827,7 +713,7 @@ app.use((error, req, res, next) => {
   next(error);
 });
 
-// Health check with detailed info
+// Health check
 app.get('/health', async (req, res) => {
   try {
     const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
@@ -842,8 +728,8 @@ app.get('/health', async (req, res) => {
         products: productCount,
         batches: batchCount
       },
-      storage: USE_CLOUDINARY ? 'cloudinary' : 'local',
-      cloudinary: USE_CLOUDINARY ? (process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured') : 'disabled',
+      storage: 'cloudinary',
+      cloudinary: 'configured',
       environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
@@ -880,7 +766,7 @@ app.post('/api/debug/upload', authenticateToken, uploadFields, (req, res) => {
       files: fileInfo,
       body: req.body,
       multerConfig: {
-        storageType: USE_CLOUDINARY ? 'cloudinary' : 'local',
+        storageType: 'cloudinary',
         limits: {
           fileSize: '50MB',
           files: 'Multiple per field'
@@ -897,7 +783,7 @@ app.post('/api/debug/upload', authenticateToken, uploadFields, (req, res) => {
   }
 });
 
-// Enhanced Authentication Routes
+// Authentication Routes
 app.post('/signin', async (req, res) => {
   try {
     const { username, password, rememberMe } = req.body;
@@ -1008,7 +894,7 @@ app.get('/auth/check', authenticateToken, async (req, res) => {
   }
 });
 
-// Enhanced Product Routes
+// Product Routes
 app.get('/api/products', authenticateToken, async (req, res) => {
   try {
     const { page = 1, limit = 50, search = '' } = req.query;
@@ -1087,7 +973,7 @@ app.get('/api/products', authenticateToken, async (req, res) => {
   }
 });
 
-// ENHANCED Product Creation Route
+// Product Creation Route
 app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
   try {
     console.log('🆕 Creating new product...');
@@ -1136,117 +1022,85 @@ app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
       });
     }
 
-    // Handle file uploads
-    if (USE_CLOUDINARY) {
-      console.log('🔗 Using Cloudinary for file uploads');
-      
-      // Upload image
-      if (req.files && req.files.image && req.files.image[0]) {
-        try {
-          console.log('📸 Uploading image to Cloudinary...');
-          const imageUrl = await handleFileUpload(req.files.image[0], 'image');
-          productData.imagePath = imageUrl;
-          console.log('✅ Image uploaded successfully:', imageUrl);
-        } catch (error) {
-          console.error('❌ Image upload error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to upload image: ' + error.message
-          });
+    // Handle file uploads to Cloudinary
+    console.log('🔗 Uploading files to Cloudinary...');
+    
+    // Upload image
+    if (req.files && req.files.image && req.files.image[0]) {
+      try {
+        console.log('📸 Uploading image to Cloudinary...');
+        const imageUrl = await handleFileUpload(req.files.image[0], 'image');
+        productData.imagePath = imageUrl;
+        console.log('✅ Image uploaded successfully:', imageUrl);
+      } catch (error) {
+        console.error('❌ Image upload error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload image: ' + error.message
+        });
+      }
+    }
+
+    // Upload NPS approval files
+    if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
+      try {
+        console.log('📄 Uploading NPS approval files...');
+        const npsUrls = [];
+        for (const file of req.files.npsApprovalFiles) {
+          const url = await handleFileUpload(file, 'documents');
+          npsUrls.push(url);
         }
+        productData.npsApproval = npsUrls.join(', ');
+        console.log('✅ NPS files uploaded successfully:', npsUrls);
+      } catch (error) {
+        console.error('❌ NPS files upload error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload NPS approval files: ' + error.message
+        });
       }
+    }
 
-      // Upload NPS approval files
-      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        try {
-          console.log('📄 Uploading NPS approval files...');
-          const npsUrls = [];
-          for (const file of req.files.npsApprovalFiles) {
-            const url = await handleFileUpload(file, 'documents');
-            npsUrls.push(url);
-          }
-          productData.npsApproval = npsUrls.join(', ');
-          console.log('✅ NPS files uploaded successfully:', npsUrls);
-        } catch (error) {
-          console.error('❌ NPS files upload error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to upload NPS approval files: ' + error.message
-          });
+    // Upload MSDS files
+    if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
+      try {
+        console.log('📄 Uploading MSDS files...');
+        const msdsUrls = [];
+        for (const file of req.files.msdsFiles) {
+          const url = await handleFileUpload(file, 'documents');
+          msdsUrls.push(url);
         }
+        productData.msds = msdsUrls.join(', ');
+        console.log('✅ MSDS files uploaded successfully:', msdsUrls);
+      } catch (error) {
+        console.error('❌ MSDS files upload error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload MSDS files: ' + error.message
+        });
       }
+    }
 
-      // Upload MSDS files
-      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        try {
-          console.log('📄 Uploading MSDS files...');
-          const msdsUrls = [];
-          for (const file of req.files.msdsFiles) {
-            const url = await handleFileUpload(file, 'documents');
-            msdsUrls.push(url);
-          }
-          productData.msds = msdsUrls.join(', ');
-          console.log('✅ MSDS files uploaded successfully:', msdsUrls);
-        } catch (error) {
-          console.error('❌ MSDS files upload error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to upload MSDS files: ' + error.message
-          });
+    // Upload certification files
+    if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
+      try {
+        console.log('📄 Uploading certification files...');
+        const certUrls = [];
+        for (const file of req.files.certificationsFiles) {
+          const url = await handleFileUpload(file, 'documents');
+          certUrls.push(url);
         }
-      }
-
-      // Upload certification files
-      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        try {
-          console.log('📄 Uploading certification files...');
-          const certUrls = [];
-          for (const file of req.files.certificationsFiles) {
-            const url = await handleFileUpload(file, 'documents');
-            certUrls.push(url);
-          }
-          if (certUrls.length > 0) {
-            productData.certifications = productData.certifications || {};
-            productData.certifications.qualityStandards = certUrls.join(', ');
-          }
-          console.log('✅ Certification files uploaded successfully:', certUrls);
-        } catch (error) {
-          console.error('❌ Certification files upload error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to upload certification files: ' + error.message
-          });
+        if (certUrls.length > 0) {
+          productData.certifications = productData.certifications || {};
+          productData.certifications.qualityStandards = certUrls.join(', ');
         }
-      }
-    } else {
-      // Local file handling
-      console.log('💾 Using local storage for file uploads');
-      
-      if (req.files && req.files.image && req.files.image[0]) {
-        productData.imagePath = `/uploads/products/${req.files.image[0].filename}`;
-        console.log('✅ Image saved locally:', productData.imagePath);
-      }
-
-      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        productData.npsApproval = req.files.npsApprovalFiles
-          .map(file => `/uploads/documents/${file.filename}`)
-          .join(', ');
-        console.log('✅ NPS files saved locally:', productData.npsApproval);
-      }
-
-      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        productData.msds = req.files.msdsFiles
-          .map(file => `/uploads/documents/${file.filename}`)
-          .join(', ');
-        console.log('✅ MSDS files saved locally:', productData.msds);
-      }
-
-      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        productData.certifications = productData.certifications || {};
-        productData.certifications.qualityStandards = req.files.certificationsFiles
-          .map(file => `/uploads/documents/${file.filename}`)
-          .join(', ');
-        console.log('✅ Certification files saved locally:', productData.certifications.qualityStandards);
+        console.log('✅ Certification files uploaded successfully:', certUrls);
+      } catch (error) {
+        console.error('❌ Certification files upload error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload certification files: ' + error.message
+        });
       }
     }
 
@@ -1283,7 +1137,7 @@ app.post('/api/products', authenticateToken, uploadFields, async (req, res) => {
   }
 });
 
-// ENHANCED Update Product Route with Dynamic Lists Support
+// Update Product Route
 app.put('/api/products/:productId', authenticateToken, uploadFields, async (req, res) => {
   try {
     const { productId } = req.params;
@@ -1329,7 +1183,7 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
       });
     }
 
-    // FIXED: Preserve existing file paths correctly
+    // Preserve existing file paths
     const preserveExistingFiles = {
       imagePath: existingProduct.imagePath,
       npsApproval: existingProduct.npsApproval,
@@ -1339,154 +1193,111 @@ app.put('/api/products/:productId', authenticateToken, uploadFields, async (req,
 
     console.log('🔍 Preserving existing files:', preserveExistingFiles);
 
-    // FIXED: Handle file uploads with better logic
-    if (USE_CLOUDINARY) {
-      console.log('🔗 Using Cloudinary for file updates');
-      
-      // Update image if provided
-      if (req.files && req.files.image && req.files.image[0]) {
-        try {
-          console.log('📸 Updating product image...');
-          const imageUrl = await handleFileUpload(req.files.image[0], 'image');
-          productData.imagePath = imageUrl;
-          console.log('✅ Image updated:', imageUrl);
-        } catch (error) {
-          console.error('❌ Image update error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to update image: ' + error.message
-          });
-        }
-      } else {
-        // Keep existing image
-        productData.imagePath = preserveExistingFiles.imagePath;
-        console.log('📸 Keeping existing image:', productData.imagePath);
-      }
-
-      // FIXED: Handle NPS approval files properly
-      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        try {
-          console.log('📄 Updating NPS approval files:', req.files.npsApprovalFiles.length, 'files');
-          const npsUrls = [];
-          for (const file of req.files.npsApprovalFiles) {
-            console.log('📄 Uploading NPS file:', file.originalname);
-            const url = await handleFileUpload(file, 'documents');
-            npsUrls.push(url);
-          }
-          productData.npsApproval = npsUrls.join(', ');
-          console.log('✅ NPS files updated:', npsUrls);
-        } catch (error) {
-          console.error('❌ NPS files update error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to update NPS approval files: ' + error.message
-          });
-        }
-      } else {
-        // Keep existing NPS files
-        productData.npsApproval = preserveExistingFiles.npsApproval;
-        console.log('📄 Keeping existing NPS files:', productData.npsApproval);
-      }
-
-      // FIXED: Handle MSDS files properly
-      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        try {
-          console.log('📄 Updating MSDS files:', req.files.msdsFiles.length, 'files');
-          const msdsUrls = [];
-          for (const file of req.files.msdsFiles) {
-            console.log('📄 Uploading MSDS file:', file.originalname);
-            const url = await handleFileUpload(file, 'documents');
-            msdsUrls.push(url);
-          }
-          productData.msds = msdsUrls.join(', ');
-          console.log('✅ MSDS files updated:', msdsUrls);
-        } catch (error) {
-          console.error('❌ MSDS files update error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to update MSDS files: ' + error.message
-          });
-        }
-      } else {
-        // Keep existing MSDS files
-        productData.msds = preserveExistingFiles.msds;
-        console.log('📄 Keeping existing MSDS files:', productData.msds);
-      }
-
-      // FIXED: Handle certification files properly
-      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        try {
-          console.log('📄 Updating certification files:', req.files.certificationsFiles.length, 'files');
-          const certUrls = [];
-          for (const file of req.files.certificationsFiles) {
-            console.log('📄 Uploading certification file:', file.originalname);
-            const url = await handleFileUpload(file, 'documents');
-            certUrls.push(url);
-          }
-          if (certUrls.length > 0) {
-            productData.certifications = productData.certifications || {};
-            productData.certifications.qualityStandards = certUrls.join(', ');
-          }
-          console.log('✅ Certification files updated:', certUrls);
-        } catch (error) {
-          console.error('❌ Certification files update error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to update certification files: ' + error.message
-          });
-        }
-      } else {
-        // Keep existing certification files
-        if (!productData.certifications) {
-          productData.certifications = {};
-        }
-        productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
-        console.log('📄 Keeping existing certification files:', productData.certifications.qualityStandards);
+    // Handle file uploads to Cloudinary
+    console.log('🔗 Updating files in Cloudinary...');
+    
+    // Update image if provided
+    if (req.files && req.files.image && req.files.image[0]) {
+      try {
+        console.log('📸 Updating product image...');
+        const imageUrl = await handleFileUpload(req.files.image[0], 'image');
+        productData.imagePath = imageUrl;
+        console.log('✅ Image updated:', imageUrl);
+      } catch (error) {
+        console.error('❌ Image update error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update image: ' + error.message
+        });
       }
     } else {
-      // FIXED: Local file handling for updates
-      console.log('💾 Using local storage for file updates');
-      
-      if (req.files && req.files.image && req.files.image[0]) {
-        productData.imagePath = `/uploads/products/${req.files.image[0].filename}`;
-        console.log('✅ Image saved locally:', productData.imagePath);
-      } else {
-        productData.imagePath = preserveExistingFiles.imagePath;
-      }
-
-      if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
-        productData.npsApproval = req.files.npsApprovalFiles
-          .map(file => `/uploads/documents/${file.filename}`)
-          .join(', ');
-        console.log('✅ NPS files saved locally:', productData.npsApproval);
-      } else {
-        productData.npsApproval = preserveExistingFiles.npsApproval;
-      }
-
-      if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
-        productData.msds = req.files.msdsFiles
-          .map(file => `/uploads/documents/${file.filename}`)
-          .join(', ');
-        console.log('✅ MSDS files saved locally:', productData.msds);
-      } else {
-        productData.msds = preserveExistingFiles.msds;
-      }
-
-      if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
-        productData.certifications = productData.certifications || {};
-        productData.certifications.qualityStandards = req.files.certificationsFiles
-          .map(file => `/uploads/documents/${file.filename}`)
-          .join(', ');
-        console.log('✅ Certification files saved locally:', productData.certifications.qualityStandards);
-      } else {
-        if (!productData.certifications) {
-          productData.certifications = {};
-        }
-        productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
-      }
+      // Keep existing image
+      productData.imagePath = preserveExistingFiles.imagePath;
+      console.log('📸 Keeping existing image:', productData.imagePath);
     }
 
-    // FIXED: Debug log before update
+    // Handle NPS approval files
+    if (req.files && req.files.npsApprovalFiles && req.files.npsApprovalFiles.length > 0) {
+      try {
+        console.log('📄 Updating NPS approval files:', req.files.npsApprovalFiles.length, 'files');
+        const npsUrls = [];
+        for (const file of req.files.npsApprovalFiles) {
+          console.log('📄 Uploading NPS file:', file.originalname);
+          const url = await handleFileUpload(file, 'documents');
+          npsUrls.push(url);
+        }
+        productData.npsApproval = npsUrls.join(', ');
+        console.log('✅ NPS files updated:', npsUrls);
+      } catch (error) {
+        console.error('❌ NPS files update error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update NPS approval files: ' + error.message
+        });
+      }
+    } else {
+      // Keep existing NPS files
+      productData.npsApproval = preserveExistingFiles.npsApproval;
+      console.log('📄 Keeping existing NPS files:', productData.npsApproval);
+    }
+
+    // Handle MSDS files
+    if (req.files && req.files.msdsFiles && req.files.msdsFiles.length > 0) {
+      try {
+        console.log('📄 Updating MSDS files:', req.files.msdsFiles.length, 'files');
+        const msdsUrls = [];
+        for (const file of req.files.msdsFiles) {
+          console.log('📄 Uploading MSDS file:', file.originalname);
+          const url = await handleFileUpload(file, 'documents');
+          msdsUrls.push(url);
+        }
+        productData.msds = msdsUrls.join(', ');
+        console.log('✅ MSDS files updated:', msdsUrls);
+      } catch (error) {
+        console.error('❌ MSDS files update error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update MSDS files: ' + error.message
+        });
+      }
+    } else {
+      // Keep existing MSDS files
+      productData.msds = preserveExistingFiles.msds;
+      console.log('📄 Keeping existing MSDS files:', productData.msds);
+    }
+
+    // Handle certification files
+    if (req.files && req.files.certificationsFiles && req.files.certificationsFiles.length > 0) {
+      try {
+        console.log('📄 Updating certification files:', req.files.certificationsFiles.length, 'files');
+        const certUrls = [];
+        for (const file of req.files.certificationsFiles) {
+          console.log('📄 Uploading certification file:', file.originalname);
+          const url = await handleFileUpload(file, 'documents');
+          certUrls.push(url);
+        }
+        if (certUrls.length > 0) {
+          productData.certifications = productData.certifications || {};
+          productData.certifications.qualityStandards = certUrls.join(', ');
+        }
+        console.log('✅ Certification files updated:', certUrls);
+      } catch (error) {
+        console.error('❌ Certification files update error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update certification files: ' + error.message
+        });
+      }
+    } else {
+      // Keep existing certification files
+      if (!productData.certifications) {
+        productData.certifications = {};
+      }
+      productData.certifications.qualityStandards = preserveExistingFiles.qualityStandards;
+      console.log('📄 Keeping existing certification files:', productData.certifications.qualityStandards);
+    }
+
+    // Debug log before update
     console.log('🔍 Final data before update:', {
       imagePath: productData.imagePath,
       npsApproval: productData.npsApproval,
@@ -1572,7 +1383,7 @@ app.delete('/api/products/:productId', authenticateToken, async (req, res) => {
   }
 });
 
-// Enhanced Batch Routes
+// Batch Routes
 app.get('/api/batches', authenticateToken, async (req, res) => {
   try {
     const { productId, page = 1, limit = 50 } = req.query;
@@ -1756,7 +1567,7 @@ app.delete('/api/batches/:batchId', authenticateToken, async (req, res) => {
   }
 });
 
-// Enhanced Product View Route (for QR code access)
+// Product View Route (for QR code access)
 app.get('/api/product-view/:batchId', async (req, res) => {
   try {
     const { batchId } = req.params;
@@ -1858,7 +1669,77 @@ app.get('/api/analytics/dashboard', authenticateToken, async (req, res) => {
   }
 });
 
-// Enhanced Error Handling - Final error handler
+// Document Routes - Simplified for Cloudinary only
+app.get('/api/documents/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    console.log('📄 Document request for:', filename);
+    
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        message: 'Filename is required'
+      });
+    }
+    
+    const decodedFilename = decodeURIComponent(filename);
+    
+    // If it's already a full URL, redirect to it
+    if (decodedFilename.startsWith('http')) {
+      console.log('🔄 Redirecting to existing URL:', decodedFilename);
+      return res.redirect(decodedFilename);
+    }
+    
+    // Otherwise, construct Cloudinary URL
+    const cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/documents/${decodedFilename}`;
+    console.log('🔄 Redirecting to Cloudinary URL:', cloudUrl);
+    res.redirect(cloudUrl);
+    
+  } catch (error) {
+    console.error('❌ Document serving error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to serve document: ' + error.message
+    });
+  }
+});
+
+// Image serving route
+app.get('/api/images/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    console.log('🖼️ Image request for:', filename);
+    
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        message: 'Filename is required'
+      });
+    }
+    
+    const decodedFilename = decodeURIComponent(filename);
+    
+    // If it's already a full URL, redirect to it
+    if (decodedFilename.startsWith('http')) {
+      console.log('🔄 Redirecting to existing URL:', decodedFilename);
+      return res.redirect(decodedFilename);
+    }
+    
+    // Otherwise, construct Cloudinary URL
+    const cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/products/${decodedFilename}`;
+    console.log('🔄 Redirecting to Cloudinary URL:', cloudUrl);
+    res.redirect(cloudUrl);
+    
+  } catch (error) {
+    console.error('❌ Image serving error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to serve image: ' + error.message
+    });
+  }
+});
+
+// Final error handler
 app.use((error, req, res, next) => {
   console.error('🚨 Unhandled error:', error);
 
@@ -1904,400 +1785,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-
-const extractDocumentFileName = (filePath) => {
-  if (!filePath) return null;
-  
-  console.log('🔍 Extracting filename from:', filePath);
-  
-  // Take first file if multiple files are comma-separated
-  const cleanPath = filePath.split(',')[0].trim();
-  
-  // If it's a full GCS URL, extract filename
-  if (cleanPath.startsWith('https://storage.googleapis.com/')) {
-    const urlParts = cleanPath.split('/');
-    const filename = urlParts[urlParts.length - 1];
-    console.log('📝 Extracted from GCS URL:', filename);
-    return decodeURIComponent(filename);
-  }
-  
-  // If it's a Cloudinary URL, extract filename
-  if (cleanPath.includes('cloudinary.com')) {
-    const urlParts = cleanPath.split('/');
-    const filename = urlParts[urlParts.length - 1];
-    console.log('📝 Extracted from Cloudinary URL:', filename);
-    return decodeURIComponent(filename);
-  }
-  
-  // If it's a path with slashes, get the last part
-  if (cleanPath.includes('/')) {
-    const segments = cleanPath.split('/');
-    const filename = segments[segments.length - 1];
-    console.log('📝 Extracted from path:', filename);
-    return filename;
-  }
-  
-  console.log('📝 Using as-is:', cleanPath);
-  return cleanPath;
-};
-
-// Helper function to get signed URL for documents stored in cloud
-const getCloudDocumentUrl = async (filePath, expiresIn = 3600) => {
-  if (!filePath) return null;
-  
-  console.log('☁️ Getting cloud URL for:', filePath);
-  
-  // Take first file if multiple files are comma-separated
-  const cleanPath = filePath.split(',')[0].trim();
-  
-  try {
-    if (USE_CLOUDINARY && cleanPath.includes('cloudinary.com')) {
-      // For Cloudinary URLs, return as-is (they're already public or signed)
-      console.log('✅ Returning Cloudinary URL as-is');
-      return cleanPath;
-    }
-    
-    if (cleanPath.startsWith('https://storage.googleapis.com/')) {
-      // For Google Cloud Storage, generate signed URL
-      console.log('🔐 Generating signed URL for GCS file');
-      
-      // Extract bucket and file path from URL
-      const urlParts = cleanPath.replace('https://storage.googleapis.com/', '').split('/');
-      const bucketName = urlParts[0];
-      const fileName = urlParts.slice(1).join('/');
-      
-      // If you have GCS configured, generate signed URL here
-      // For now, return the direct URL
-      console.log('⚠️ GCS signed URL generation not implemented, returning direct URL');
-      return cleanPath;
-    }
-    
-    // For other URLs, return as-is
-    return cleanPath;
-    
-  } catch (error) {
-    console.error('❌ Error getting cloud document URL:', error);
-    return cleanPath; // Fallback to original URL
-  }
-};
-
-// Route to get signed URL for documents (POST method to handle full paths)
-app.post('/api/documents/get-signed-url', authenticateToken, async (req, res) => {
-  try {
-    const { filePath, type = 'documents' } = req.body;
-    
-    console.log('📄 Getting signed URL for:', filePath);
-    
-    if (!filePath) {
-      return res.status(400).json({
-        success: false,
-        message: 'File path is required'
-      });
-    }
-    
-    // Clean the file path
-    const cleanPath = filePath.split(',')[0].trim();
-    
-    if (!cleanPath || 
-        cleanPath.toLowerCase().includes('no document') ||
-        cleanPath === 'No documents uploaded' ||
-        cleanPath === 'No document uploaded') {
-      return res.status(404).json({
-        success: false,
-        message: 'No document available'
-      });
-    }
-    
-    // Get the signed URL
-    const signedUrl = await getCloudDocumentUrl(cleanPath);
-    
-    if (!signedUrl) {
-      return res.status(404).json({
-        success: false,
-        message: 'Document not found or not accessible'
-      });
-    }
-    
-    console.log('✅ Generated signed URL successfully');
-    
-    res.json({
-      success: true,
-      signedUrl: signedUrl,
-      actualPath: cleanPath,
-      filename: extractDocumentFileName(cleanPath),
-      expiresIn: 3600 // 1 hour
-    });
-    
-  } catch (error) {
-    console.error('❌ Error getting signed URL:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get document URL: ' + error.message
-    });
-  }
-});
-
-// Route to get signed URL for documents (GET method for simple filenames)
-app.get('/api/documents/signed-url/:type/:filename', authenticateToken, async (req, res) => {
-  try {
-    const { type, filename } = req.params;
-    
-    console.log('📄 Getting signed URL for filename:', filename);
-    
-    if (!filename) {
-      return res.status(400).json({
-        success: false,
-        message: 'Filename is required'
-      });
-    }
-    
-    const decodedFilename = decodeURIComponent(filename);
-    
-    // For local storage
-    if (!USE_CLOUDINARY) {
-      const localPath = `/uploads/${type}/${decodedFilename}`;
-      const fullPath = path.join(__dirname, 'uploads', type, decodedFilename);
-      
-      if (fs.existsSync(fullPath)) {
-        const signedUrl = `${req.protocol}://${req.get('host')}${localPath}`;
-        return res.json({
-          success: true,
-          signedUrl: signedUrl,
-          actualPath: localPath,
-          filename: decodedFilename
-        });
-      } else {
-        return res.status(404).json({
-          success: false,
-          message: 'Document not found'
-        });
-      }
-    }
-    
-    // For cloud storage, construct the likely URL
-    let cloudUrl = null;
-    
-    if (decodedFilename.startsWith('http')) {
-      cloudUrl = decodedFilename;
-    } else {
-      // Construct Cloudinary URL if using Cloudinary
-      if (process.env.CLOUDINARY_CLOUD_NAME) {
-        cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${type}/${decodedFilename}`;
-      }
-    }
-    
-    if (cloudUrl) {
-      res.json({
-        success: true,
-        signedUrl: cloudUrl,
-        actualPath: cloudUrl,
-        filename: decodedFilename
-      });
-    } else {
-      res.status(404).json({
-        success: false,
-        message: 'Document not found'
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ Error getting signed URL:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get document URL: ' + error.message
-    });
-  }
-});
-
-// Route to directly download documents
-app.get('/api/documents/download/:type/:filename', async (req, res) => {
-  try {
-    const { type, filename } = req.params;
-    
-    console.log('⬇️ Direct download request for:', filename);
-    
-    if (!filename) {
-      return res.status(400).json({
-        success: false,
-        message: 'Filename is required'
-      });
-    }
-    
-    const decodedFilename = decodeURIComponent(filename);
-    
-    // For local storage
-    if (!USE_CLOUDINARY) {
-      const filePath = path.join(__dirname, 'uploads', type, decodedFilename);
-      
-      if (fs.existsSync(filePath)) {
-        const stat = fs.statSync(filePath);
-        const fileExtension = path.extname(decodedFilename).toLowerCase();
-        
-        // Set appropriate content type
-        let contentType = 'application/octet-stream';
-        if (fileExtension === '.pdf') contentType = 'application/pdf';
-        else if (fileExtension === '.doc') contentType = 'application/msword';
-        else if (fileExtension === '.docx') contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        else if (fileExtension === '.txt') contentType = 'text/plain';
-        
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Content-Length', stat.size);
-        res.setHeader('Content-Disposition', `attachment; filename="${decodedFilename}"`);
-        res.setHeader('Cache-Control', 'no-cache');
-        
-        const fileStream = fs.createReadStream(filePath);
-        fileStream.pipe(res);
-        
-        console.log('✅ Local file download started');
-        return;
-      }
-    }
-    
-    // For cloud storage, redirect to the cloud URL
-    let cloudUrl = null;
-    
-    if (decodedFilename.startsWith('http')) {
-      cloudUrl = decodedFilename;
-    } else if (process.env.CLOUDINARY_CLOUD_NAME) {
-      cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${type}/${decodedFilename}`;
-    }
-    
-    if (cloudUrl) {
-      console.log('🔄 Redirecting to cloud URL:', cloudUrl);
-      res.redirect(cloudUrl);
-    } else {
-      res.status(404).json({
-        success: false,
-        message: 'Document not found'
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ Download error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Download failed: ' + error.message
-    });
-  }
-});
-
-// Route to serve images with proxy support
-app.get('/api/files/image/:filename', async (req, res) => {
-  try {
-    const { filename } = req.params;
-    
-    console.log('🖼️ Image request for:', filename);
-    
-    if (!filename) {
-      return res.status(400).json({
-        success: false,
-        message: 'Filename is required'
-      });
-    }
-    
-    const decodedFilename = decodeURIComponent(filename);
-    
-    // For local storage
-    if (!USE_CLOUDINARY) {
-      const imagePath = path.join(__dirname, 'uploads', 'products', decodedFilename);
-      
-      if (fs.existsSync(imagePath)) {
-        const stat = fs.statSync(imagePath);
-        const fileExtension = path.extname(decodedFilename).toLowerCase();
-        
-        // Set appropriate content type for images
-        let contentType = 'image/jpeg';
-        if (fileExtension === '.png') contentType = 'image/png';
-        else if (fileExtension === '.gif') contentType = 'image/gif';
-        else if (fileExtension === '.webp') contentType = 'image/webp';
-        else if (fileExtension === '.svg') contentType = 'image/svg+xml';
-        
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Content-Length', stat.size);
-        res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
-        
-        const fileStream = fs.createReadStream(imagePath);
-        fileStream.pipe(res);
-        
-        console.log('✅ Local image served');
-        return;
-      }
-    }
-    
-    // For cloud storage, redirect to the cloud URL
-    let cloudUrl = null;
-    
-    if (decodedFilename.startsWith('http')) {
-      cloudUrl = decodedFilename;
-    } else if (process.env.CLOUDINARY_CLOUD_NAME) {
-      cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/products/${decodedFilename}`;
-    }
-    
-    if (cloudUrl) {
-      console.log('🔄 Redirecting to cloud image URL:', cloudUrl);
-      res.redirect(cloudUrl);
-    } else {
-      // Return a placeholder image or 404
-      res.status(404).json({
-        success: false,
-        message: 'Image not found'
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ Image serving error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to serve image: ' + error.message
-    });
-  }
-});
-
-// Debug route to test document access
-app.get('/api/debug/document-access/:type/:filename', authenticateToken, async (req, res) => {
-  try {
-    const { type, filename } = req.params;
-    const decodedFilename = decodeURIComponent(filename);
-    
-    console.log('🧪 Debug document access for:', decodedFilename);
-    
-    const debugInfo = {
-      filename: decodedFilename,
-      type: type,
-      storageType: USE_CLOUDINARY ? 'cloudinary' : 'local',
-      cloudinaryConfigured: !!process.env.CLOUDINARY_CLOUD_NAME
-    };
-    
-    if (!USE_CLOUDINARY) {
-      // Check local file
-      const localPath = path.join(__dirname, 'uploads', type, decodedFilename);
-      debugInfo.localPath = localPath;
-      debugInfo.localExists = fs.existsSync(localPath);
-      
-      if (debugInfo.localExists) {
-        const stat = fs.statSync(localPath);
-        debugInfo.fileSize = stat.size;
-        debugInfo.lastModified = stat.mtime;
-      }
-    } else {
-      // For cloud storage
-      debugInfo.cloudUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/raw/upload/${type}/${decodedFilename}`;
-    }
-    
-    res.json({
-      success: true,
-      debug: debugInfo
-    });
-    
-  } catch (error) {
-    console.error('🧪 Debug error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Debug failed: ' + error.message
-    });
-  }
-});
-
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ 
@@ -2318,6 +1805,8 @@ app.use((req, res) => {
       'DELETE /api/batches/:batchId',
       'GET /api/product-view/:batchId',
       'GET /api/analytics/dashboard',
+      'GET /api/documents/:filename',
+      'GET /api/images/:filename',
       'POST /api/debug/upload'
     ]
   });
@@ -2353,37 +1842,36 @@ app.listen(PORT, async () => {
   console.log('🚀 ===================================');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📁 Storage: ${USE_CLOUDINARY ? 'Cloudinary' : 'Local'}`);
-  console.log('🔧 Enhanced Features:');
+  console.log(`📁 Storage: Cloudinary Only`);
+  console.log('🔧 Features:');
   console.log('   ✅ Dynamic Lists Support');
-  console.log('   ✅ Enhanced File Handling');
-  console.log('   ✅ Better Error Handling');
+  console.log('   ✅ Cloudinary File Storage');
+  console.log('   ✅ Enhanced Error Handling');
   console.log('   ✅ Smart Data Validation');
   console.log('   ✅ Enhanced Logging');
-  console.log('   ✅ Fixed Upload Fields Configuration');
+  console.log('   ✅ No Local File Storage');
+  console.log('   ✅ Memory Storage for Multer');
   
-  if (USE_CLOUDINARY) {
-    console.log('🔗 Cloudinary file storage configured');
-  } else {
-    console.log('💾 Local file storage configured');
-    console.log(`📁 Static files served at: /uploads`);
-  }
+  console.log('🔗 Cloudinary file storage configured');
+  console.log(`☁️ Cloud name: ${process.env.CLOUDINARY_CLOUD_NAME}`);
   
   console.log('🔧 API Routes:');
   console.log(`   GET  /health - Health check`);
   console.log(`   POST /signin - User authentication`);
   console.log(`   GET  /api/products - Get all products`);
-  console.log(`   POST /api/products - Create product (Enhanced)`);
-  console.log(`   PUT  /api/products/:productId - Update product (Enhanced)`);
+  console.log(`   POST /api/products - Create product`);
+  console.log(`   PUT  /api/products/:productId - Update product`);
   console.log(`   GET  /api/product-view/:batchId - Public product view`);
   console.log(`   GET  /api/analytics/dashboard - Analytics`);
-  console.log(`   POST /api/debug/upload - File upload debug (New)`);
+  console.log(`   GET  /api/documents/:filename - Serve documents`);
+  console.log(`   GET  /api/images/:filename - Serve images`);
+  console.log(`   POST /api/debug/upload - File upload debug`);
   console.log('🚀 ===================================');
   
   await initializeAdmin();
   await updateExistingBatches();
   
   console.log('✅ Server initialization complete!');
-  console.log('🎯 Ready to handle dynamic lists and fixed file uploads!');
-  console.log('🔧 File upload issues should now be resolved!');
+  console.log('☁️ All files will be stored in Cloudinary!');
+  console.log('🚫 Local file storage disabled!');
 });
